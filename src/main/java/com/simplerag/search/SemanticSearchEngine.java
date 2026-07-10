@@ -1,7 +1,7 @@
 package com.simplerag.search;
 
 import com.simplerag.embedding.EmbeddingProvider;
-import com.simplerag.embedding.PythonOnnxEmbeddingProvider;
+import com.simplerag.embedding.Langchain4jOnnxEmbeddingProvider;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.SearchResult;
 import com.simplerag.model.SemanticHighlight;
@@ -69,9 +69,11 @@ public final class SemanticSearchEngine {
     private volatile boolean embeddingsActive;
     private String cachedQueryText = "";
     private float[] cachedQueryEmbedding;
+    private String highlightCacheQuery = "";
+    private final Map<String, List<SemanticHighlight>> highlightCache = new HashMap<>();
 
     public SemanticSearchEngine() {
-        this(new PythonOnnxEmbeddingProvider());
+        this(new Langchain4jOnnxEmbeddingProvider());
     }
 
     public SemanticSearchEngine(EmbeddingProvider embeddingProvider) {
@@ -145,6 +147,7 @@ public final class SemanticSearchEngine {
             embeddingsActive = true;
         }
 
+        clearHighlightCache();
         this.state = State.build(chunks);
         this.roots = normalizedRoots.stream().map(Path::toString).toList();
         this.indexedAt = System.currentTimeMillis();
@@ -216,6 +219,28 @@ public final class SemanticSearchEngine {
                 || !embeddingProvider.isConfigured() || limit <= 0) {
             return List.of();
         }
+        List<SemanticHighlight> cached = cachedHighlights(cleaned, chunk, limit);
+        if (cached != null) return cached;
+        List<SemanticHighlight> located = locateHighlights(cleaned, chunk, limit);
+        rememberHighlights(cleaned, chunk, limit, located);
+        return located;
+    }
+
+    private synchronized List<SemanticHighlight> cachedHighlights(String query, DocumentChunk chunk, int limit) {
+        return query.equals(highlightCacheQuery) ? highlightCache.get(chunk.id() + "@" + limit) : null;
+    }
+
+    private synchronized void rememberHighlights(String query, DocumentChunk chunk, int limit,
+                                                 List<SemanticHighlight> highlights) {
+        if (!query.equals(highlightCacheQuery)) {
+            highlightCache.clear();
+            highlightCacheQuery = query;
+        }
+        highlightCache.put(chunk.id() + "@" + limit, highlights);
+    }
+
+    private List<SemanticHighlight> locateHighlights(String cleaned, DocumentChunk chunk, int limit)
+            throws IOException {
         float[] queryVector = semanticQuery(cleaned);
         List<TextSpan> candidates = candidateSpans(chunk.content());
         if (candidates.isEmpty()) return List.of();
@@ -243,6 +268,7 @@ public final class SemanticSearchEngine {
     }
 
     public void restore(IndexSnapshot snapshot) {
+        clearHighlightCache();
         this.state = State.build(snapshot.chunks());
         this.roots = List.copyOf(snapshot.roots());
         this.indexedAt = snapshot.indexedAt();
@@ -285,6 +311,11 @@ public final class SemanticSearchEngine {
         if (!embeddingProvider.isConfigured()) return "未安装语义模型";
         if (!state.hasEmbeddings) return "模型已安装，需重建索引";
         return embeddingProvider.status();
+    }
+
+    private synchronized void clearHighlightCache() {
+        highlightCache.clear();
+        highlightCacheQuery = "";
     }
 
     private synchronized float[] semanticQuery(String query) throws IOException {

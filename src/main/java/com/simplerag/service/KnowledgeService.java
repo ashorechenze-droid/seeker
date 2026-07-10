@@ -1,7 +1,7 @@
 package com.simplerag.service;
 
 import com.simplerag.embedding.EmbeddingProvider;
-import com.simplerag.embedding.PythonOnnxEmbeddingProvider;
+import com.simplerag.embedding.Langchain4jOnnxEmbeddingProvider;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.RagAnswer;
@@ -44,7 +44,7 @@ public final class KnowledgeService {
     private KnowledgeBase activeKnowledgeBase;
 
     public KnowledgeService() {
-        this(new PythonOnnxEmbeddingProvider(), new DatabaseManager(), new SecretCodec(),
+        this(new Langchain4jOnnxEmbeddingProvider(), new DatabaseManager(), new SecretCodec(),
                 new OpenAiCompatibleClient(),
                 Path.of(System.getProperty("user.home"), ".simplerag", "indexes"));
     }
@@ -144,11 +144,26 @@ public final class KnowledgeService {
     }
 
     public RagAnswer ask(String question, ApiConfig config) throws IOException, InterruptedException {
+        return apiClient.answer(config, question, retrieveCitations(question));
+    }
+
+    /**
+     * Streams a RAG answer. The retrieved citations are handed to {@code onCitations} before generation
+     * starts so the UI can render sources immediately, then {@code onDelta} receives each incremental
+     * chunk of the generated text.
+     */
+    public RagAnswer askStream(String question, ApiConfig config, Consumer<List<RagCitation>> onCitations,
+                               Consumer<String> onDelta) throws IOException, InterruptedException {
+        List<RagCitation> citations = retrieveCitations(question);
+        if (onCitations != null) onCitations.accept(citations);
+        return apiClient.answerStream(config, question, citations, onDelta);
+    }
+
+    private List<RagCitation> retrieveCitations(String question) {
         List<SearchResult> results = search(question, 8, "全部");
-        List<RagCitation> citations = java.util.stream.IntStream.range(0, Math.min(6, results.size()))
+        return java.util.stream.IntStream.range(0, Math.min(6, results.size()))
                 .mapToObj(index -> new RagCitation(index + 1, results.get(index).chunk(), results.get(index).score()))
                 .toList();
-        return apiClient.answer(config, question, citations);
     }
 
     public List<String> fetchModels(ApiConfig config) throws IOException, InterruptedException {

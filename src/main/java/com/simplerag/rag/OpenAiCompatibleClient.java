@@ -7,15 +7,20 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.simplerag.model.RagAnswer;
 import com.simplerag.model.RagCitation;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.Consumer;
 
 public final class OpenAiCompatibleClient {
     private final HttpClient httpClient;
@@ -54,18 +59,8 @@ public final class OpenAiCompatibleClient {
 
     public RagAnswer answer(ApiConfig config, String question, List<RagCitation> citations)
             throws IOException, InterruptedException {
-        config.validateForChat();
-        if (question == null || question.isBlank()) throw new IllegalArgumentException("请输入问题");
-        if (citations.isEmpty()) throw new IllegalArgumentException("当前知识库没有可用于回答的相关内容");
-
-        ObjectNode payload = json.createObjectNode();
-        payload.put("model", config.model());
-        payload.put("temperature", 0.2);
-        payload.put("stream", false);
-        ArrayNode messages = payload.putArray("messages");
-        messages.addObject().put("role", "system").put("content", systemPrompt());
-        messages.addObject().put("role", "user").put("content", userPrompt(question, citations));
-
+        validateAnswerInput(config, question, citations);
+        ObjectNode payload = chatPayload(config, question, citations, false);
         HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "chat/completions"))
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload))).build();
         JsonNode response = send(request);
@@ -73,6 +68,85 @@ public final class OpenAiCompatibleClient {
         String answer = content.isTextual() ? content.asText() : flattenContent(content);
         if (answer.isBlank()) throw new IOException("API 返回了空答案");
         return new RagAnswer(answer.strip(), List.copyOf(citations), config.model());
+    }
+
+    /**
+     * Streams the answer token by token via server-sent events, invoking {@code onDelta} for each
+     * incremental chunk of text. Falls back to the non-streaming {@link #answer} call when the server
+     * does not honour SSE, so callers always receive a complete {@link RagAnswer}.
+     */
+    public RagAnswer answerStream(ApiConfig config, String question, List<RagCitation> citations,
+                                  Consumer<String> onDelta) throws IOException, InterruptedException {
+        validateAnswerInput(config, question, citations);
+        ObjectNode payload = chatPayload(config, question, citations, true);
+        HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "chat/completions"))
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload))).build();
+
+        HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            response.body().close();
+            return answer(config, question, citations);
+        }
+        StringBuilder full = new StringBuilder();
+        boolean streamed = false;
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("已取消问答");
+                }
+                if (!line.startsWith("data:")) continue;
+                String data = line.substring(5).strip();
+                if (data.isEmpty()) continue;
+                if ("[DONE]".equals(data)) break;
+                streamed = true;
+                String delta = extractDelta(data);
+                if (!delta.isEmpty()) {
+                    full.append(delta);
+                    if (onDelta != null) onDelta.accept(delta);
+                }
+            }
+        }
+        if (!streamed) {
+            // The endpoint accepted the request but did not emit SSE frames; retry without streaming.
+            return answer(config, question, citations);
+        }
+        if (full.toString().isBlank()) throw new IOException("API 返回了空答案");
+        return new RagAnswer(full.toString().strip(), List.copyOf(citations), config.model());
+    }
+
+    private void validateAnswerInput(ApiConfig config, String question, List<RagCitation> citations) {
+        config.validateForChat();
+        if (question == null || question.isBlank()) throw new IllegalArgumentException("请输入问题");
+        if (citations.isEmpty()) throw new IllegalArgumentException("当前知识库没有可用于回答的相关内容");
+    }
+
+    private ObjectNode chatPayload(ApiConfig config, String question, List<RagCitation> citations, boolean stream) {
+        ObjectNode payload = json.createObjectNode();
+        payload.put("model", config.model());
+        payload.put("temperature", 0.2);
+        payload.put("stream", stream);
+        ArrayNode messages = payload.putArray("messages");
+        messages.addObject().put("role", "system").put("content", systemPrompt());
+        messages.addObject().put("role", "user").put("content", userPrompt(question, citations));
+        return payload;
+    }
+
+    private String extractDelta(String data) {
+        try {
+            JsonNode node = json.readTree(data);
+            JsonNode choice = node.path("choices").path(0);
+            JsonNode content = choice.path("delta").path("content");
+            if (content.isMissingNode() || content.isNull()) {
+                content = choice.path("message").path("content");
+            }
+            return content.isTextual() ? content.asText() : "";
+        } catch (IOException malformedFrame) {
+            // A partial SSE frame can arrive split across reads; skipping it keeps the stream alive.
+            return "";
+        }
     }
 
     private JsonNode send(HttpRequest request) throws IOException, InterruptedException {

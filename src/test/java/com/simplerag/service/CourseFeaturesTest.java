@@ -65,6 +65,17 @@ public final class CourseFeaturesTest {
         check(!answer.citations().isEmpty(), "RAG 答案必须包含引用");
         check(chatRequest.get().contains("database-connection.md"), "发送给模型的上下文应包含来源文件");
 
+        StringBuilder streamed = new StringBuilder();
+        AtomicReference<List<?>> streamedCitations = new AtomicReference<>();
+        RagAnswer streamAnswer = service.askStream("How should MySQL credentials be stored?", config,
+                streamedCitations::set, streamed::append);
+        check(streamedCitations.get() != null && !streamedCitations.get().isEmpty(),
+                "流式问答应先返回引用");
+        check(streamed.toString().equals("Store credentials in environment variables [1]."),
+                "流式增量拼接后应还原完整答案");
+        check(streamAnswer.text().equals(streamed.toString()), "流式最终答案应与增量一致");
+        check(chatRequest.get().contains("\"stream\":true"), "流式请求应设置 stream=true");
+
         service.deleteKnowledgeBase(code.id());
         check(service.knowledgeBases().size() == 1, "删除后应保留另一个知识库");
         check(service.currentKnowledgeBase().id().equals(first.id()), "删除当前库后应自动切换");
@@ -80,8 +91,13 @@ public final class CourseFeaturesTest {
             respond(exchange, 200, "{\"data\":[{\"id\":\"second-model\"},{\"id\":\"mock-model\"}]}");
         });
         server.createContext("/v1/chat/completions", exchange -> {
-            chatRequest.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-            respond(exchange, 200, "{\"choices\":[{\"message\":{\"content\":\"Store credentials in environment variables [1].\"}}]}");
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            chatRequest.set(body);
+            if (body.contains("\"stream\":true")) {
+                respondStream(exchange, List.of("Store credentials", " in environment", " variables [1]."));
+            } else {
+                respond(exchange, 200, "{\"choices\":[{\"message\":{\"content\":\"Store credentials in environment variables [1].\"}}]}");
+            }
         });
         return server;
     }
@@ -91,6 +107,21 @@ public final class CourseFeaturesTest {
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
+        exchange.close();
+    }
+
+    private static void respondStream(HttpExchange exchange, List<String> deltas) throws IOException {
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+        exchange.sendResponseHeaders(200, 0);
+        try (var output = exchange.getResponseBody()) {
+            for (String delta : deltas) {
+                String frame = "data: {\"choices\":[{\"delta\":{\"content\":\""
+                        + delta.replace("\"", "\\\"") + "\"}}]}\n\n";
+                output.write(frame.getBytes(StandardCharsets.UTF_8));
+                output.flush();
+            }
+            output.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+        }
         exchange.close();
     }
 

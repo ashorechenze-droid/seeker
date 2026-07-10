@@ -108,15 +108,19 @@ public final class MainFrame extends JFrame {
     private final JLabel answerTitle = new JLabel("知识库回答");
     private final JButton askButton = new JButton("发送问题");
     private final Timer searchTimer;
+    private final Timer statusResetTimer;
     private boolean refreshingKnowledgeBases;
     private SwingWorker<List<SearchResult>, Void> searchWorker;
     private SwingWorker<List<SemanticHighlight>, Void> highlightWorker;
+    private SwingWorker<RagAnswer, String> askWorker;
 
     public MainFrame(KnowledgeService service) {
         super("SimpleRAG - 本地语义知识库");
         this.service = service;
         this.searchTimer = new Timer(180, event -> performSearch());
         searchTimer.setRepeats(false);
+        this.statusResetTimer = new Timer(4000, event -> statusLabel.setText("就绪"));
+        statusResetTimer.setRepeats(false);
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setMinimumSize(new Dimension(1120, 680));
@@ -486,6 +490,12 @@ public final class MainFrame extends JFrame {
             public void changedUpdate(DocumentEvent event) { scheduleSearch(); }
         });
         extensionFilter.addActionListener(event -> scheduleSearch());
+        searchField.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "clearSearch");
+        searchField.getActionMap().put("clearSearch", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent event) {
+                if (!searchField.getText().isEmpty()) searchField.setText("");
+            }
+        });
         resultList.addListSelectionListener(event -> {
             if (!event.getValueIsAdjusting()) setPreview(resultList.getSelectedValue());
         });
@@ -875,6 +885,10 @@ public final class MainFrame extends JFrame {
     }
 
     private void askQuestion() {
+        if (askWorker != null && !askWorker.isDone()) {
+            askWorker.cancel(true);
+            return;
+        }
         String question = questionArea.getText().strip();
         if (question.isEmpty()) return;
         ApiConfig config = apiConfigFromFields();
@@ -885,31 +899,57 @@ public final class MainFrame extends JFrame {
             showError("API 配置不完整", failure);
             return;
         }
-        askButton.setEnabled(false);
+        setAsking(true);
         answerTitle.setText("正在检索并生成回答...");
         answerArea.setText("");
         citationModel.clear();
-        new SwingWorker<RagAnswer, Void>() {
+        askWorker = new SwingWorker<>() {
             @Override protected RagAnswer doInBackground() throws Exception {
-                return service.ask(question, config);
+                return service.askStream(question, config,
+                        citations -> publishCitations(citations),
+                        delta -> publish(delta));
+            }
+
+            @Override protected void process(List<String> chunks) {
+                if (isCancelled()) return;
+                for (String chunk : chunks) answerArea.append(chunk);
+                answerArea.setCaretPosition(answerArea.getDocument().getLength());
             }
 
             @Override protected void done() {
-                askButton.setEnabled(true);
+                setAsking(false);
+                if (isCancelled()) {
+                    answerTitle.setText("已停止");
+                    flashStatus("问答已停止");
+                    return;
+                }
                 try {
                     RagAnswer answer = get();
                     answerTitle.setText("回答 · " + answer.model());
-                    answerArea.setText(answer.text());
+                    if (answerArea.getDocument().getLength() == 0) answerArea.setText(answer.text());
                     answerArea.setCaretPosition(0);
-                    answer.citations().forEach(citationModel::addElement);
-                    statusLabel.setText("问答完成，引用 " + answer.citations().size() + " 个片段");
+                    flashStatus("问答完成，引用 " + answer.citations().size() + " 个片段");
                 } catch (Exception failure) {
                     answerTitle.setText("生成失败");
                     answerArea.setText(rootCause(failure).getMessage());
-                    statusLabel.setText("问答失败");
+                    flashStatus("问答失败");
                 }
             }
-        }.execute();
+        };
+        askWorker.execute();
+    }
+
+    private void publishCitations(List<RagCitation> citations) {
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            citationModel.clear();
+            citations.forEach(citationModel::addElement);
+            answerTitle.setText(citations.isEmpty() ? "未找到相关引用，正在生成..." : "正在生成回答...");
+        });
+    }
+
+    private void setAsking(boolean asking) {
+        askButton.setText(asking ? "停止" : "发送问题");
+        questionArea.setEnabled(!asking);
     }
 
     private void setIndexing(boolean indexing, String status) {
@@ -921,9 +961,12 @@ public final class MainFrame extends JFrame {
     }
 
     private void clearWorkspace() {
+        if (askWorker != null && !askWorker.isDone()) askWorker.cancel(true);
+        setAsking(false);
         resultModel.clear();
         citationModel.clear();
         searchField.setText("");
+        answerTitle.setText("知识库回答");
         answerArea.setText("当前知识库已切换，可以开始新的问答。");
         setPreview(null);
     }
@@ -956,12 +999,17 @@ public final class MainFrame extends JFrame {
         if (selected != null) {
             Toolkit.getDefaultToolkit().getSystemClipboard()
                     .setContents(new StringSelection(selected.chunk().content()), null);
-            statusLabel.setText("片段已复制");
+            flashStatus("片段已复制");
         }
     }
 
     private void scheduleSearch() {
         searchTimer.restart();
+    }
+
+    private void flashStatus(String message) {
+        statusLabel.setText(message);
+        statusResetTimer.restart();
     }
 
     private KnowledgeBaseInput showKnowledgeBaseDialog(String title, String name, String description) {
