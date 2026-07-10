@@ -16,8 +16,8 @@
 | JDK | `JAVA_HOME` 为 JDK 17 | 将 Maven 编译目标从错误的 Java 19 调整为 17 |
 | 系统 Java | PATH 中的 Java 21 启动器会异常退出 | 启动脚本优先使用 `%JAVA_HOME%\bin\javaw.exe` |
 | Maven | 3.9.9，可正常构建 | 继续使用 Maven |
-| Python | 3.12.7 | 用作本地 ONNX 推理运行时 |
-| 推理包 | NumPy、ONNX Runtime、Tokenizers 已安装 | 直接复用本机环境 |
+| Python | 3.12.7 | 初期用作本地 ONNX 推理运行时，已在 5.9 用 LangChain4j 替换并移除 |
+| 推理包 | NumPy、ONNX Runtime、Tokenizers | 初期复用本机环境，现由 LangChain4j 的 Java ONNX Runtime 与 DJL Tokenizer 替代 |
 | Ollama | 未安装 | 不依赖 Ollama，采用独立 ONNX 模型 |
 | 模型缓存 | 只有未完成的 Hugging Face 元数据 | 从镜像重新下载完整量化模型 |
 | SQLite | JDK 不内置 SQLite 驱动 | 引入 `sqlite-jdbc` 并打入自包含 JAR |
@@ -76,8 +76,8 @@
 | `MainFrame` | 知识库管理、搜索、高亮、API 配置和问答交互 |
 | `KnowledgeService` | 编排知识库切换、独立索引、检索、模型列表和问答用例 |
 | `SemanticSearchEngine` | 文件扫描、分块、稀疏特征、向量召回、混合排序 |
-| `PythonOnnxEmbeddingProvider` | 管理持久 Python 进程并交换批量向量 |
-| `embedding_worker.py` | Tokenizer、ONNX 推理、平均池化和向量归一化 |
+| `Langchain4jOnnxEmbeddingProvider` | 用 LangChain4j in-process ONNX 模型在 JVM 内做 tokenizer、推理、平均池化和归一化 |
+| `ModelDownloader` | 纯 Java 从镜像下载模型文件，替代 Python 下载脚本 |
 | `IndexStore` | 使用临时文件和原子替换持久化索引快照 |
 | `DocumentChunk` | 保存路径、行号、内容及 384 维文档向量 |
 | `AppRepository` | 使用 SQLite 完成知识库、数据源和设置 CRUD |
@@ -155,6 +155,34 @@ API Key 使用当前用户名、用户目录和应用固定盐派生 AES 密钥�
 
 项目引入 Maven Shade Plugin，把 SQLite JDBC、Jackson、FlatLaf 及其服务注册文件合并到一个约 17 MB 的可执行 JAR。Maven 依赖保存到项目 `.mvn/repository`，避免写入只读的系统仓库。
 
+### 5.8 交互体验优化
+
+在功能基本完备后，针对实际使用中的等待感和操作细节做了一轮体验优化，未引入任何新的第三方依赖。
+
+**流式问答。** 原问答使用非流式响应，客户端要等模型返回完整 JSON 才一次性显示答案，长回答期间界面没有反馈。`OpenAiCompatibleClient` 新增 `answerStream`，以 `Accept: text/event-stream` 发起请求并逐行解析 SSE `data:` 帧，每收到一个增量 token 就通过回调推给上层；遇到 `[DONE]` 结束。`KnowledgeService.askStream` 先执行检索并通过回调把引用交给界面立即渲染，再开始流式生成。`MainFrame` 用 `SwingWorker` 的 `publish/process` 把增量追加到答案区，实现逐字显示。
+
+为兼容不支持 SSE 的服务，`answerStream` 具备两级回退：HTTP 非 2xx，或响应虽然成功但没有产生任何 SSE 帧时，自动改用原有的非流式 `answer`，保证不会因为改造反而不可用。原 `answer` 方法保留，问答的 payload 构造抽取为 `chatPayload` 供两条路径复用。
+
+**可停止的问答。** 发送问题后“发送问题”按钮变为“停止”，再次点击即取消当前 `SwingWorker`；后台的 SSE 读取循环检测到线程中断后立即退出。切换知识库时也会取消正在进行的问答，避免答案错位到新知识库。
+
+**片段定位缓存。** 句子级语义定位原本在每次首次选中结果时都要现场做一次小批量推理。`SemanticSearchEngine` 增加查询级缓存：同一查询下在不同结果之间来回切换时，已计算的定位结果按 `chunkId@limit` 复用；查询文本变化，或重建、恢复索引时缓存清空。这在不改动索引文件格式、不引入旧索引迁移风险的前提下，消除了同一查询下的重复推理延迟。
+
+**其他细节。** 搜索框支持 `Esc` 一键清空；复制片段、问答完成/停止等瞬时状态提示在 4 秒后自动恢复为“就绪”，状态栏不再长期停留在过时信息上。
+
+### 5.9 用 LangChain4j 替换 Python 桥接
+
+初期语义推理由一个常驻 Python 进程完成：Java 端 `PythonOnnxEmbeddingProvider` 通过标准输入输出，用 Base64 文本请求和 little-endian float32 响应与 `embedding_worker.py` 交换向量。这套桥接能工作，但带来额外的部署负担——用户必须自行安装 Python 3.10+、NumPy、ONNX Runtime 和 Hugging Face Tokenizers，且进程协议、异常退出、日志都要手写维护。
+
+本阶段用 LangChain4j 的标准 in-process 组件替换整条桥接，目标是零 Python 运行时。
+
+**embedding 层。** 新增 `Langchain4jOnnxEmbeddingProvider`，实现原有的 `EmbeddingProvider` 接口（`embed(List<String>) -> List<float[]>` 签名不变），内部用 `dev.langchain4j.model.embedding.onnx.OnnxEmbeddingModel(onnxPath, tokenizerPath, PoolingMode.MEAN)` 直接在 JVM 内加载同一个量化模型。LangChain4j 传递依赖带入微软官方的 `onnxruntime`（Java 版，含全平台原生库）和 DJL 的 HuggingFace `tokenizers`，分别替代 Python 的 onnxruntime 与 tokenizers 包。MEAN 池化与 L2 归一化由模型内部完成，行为与原 `embedding_worker.py` 一致。模型懒加载且线程安全，`modelName()` 仍返回原模型标识符，因此已有索引快照的模型名匹配逻辑无需迁移。
+
+**模型下载。** 新增纯 Java `ModelDownloader`，用 `HttpClient` 从可配置镜像（默认 hf-mirror.com）直链下载 `tokenizer.json` 和 `model_quint8_avx2.onnx`，自动跟随 302 重定向，先写临时文件再原子 move。`setup-semantic-model.cmd` 改为调用该下载器，不再 `pip install` 任何包。
+
+**删除项。** `PythonOnnxEmbeddingProvider.java`、`scripts/embedding_worker.py`、`scripts/download_model.py` 全部删除；不再产生 `~/.simplerag/embedding.log` 进程日志。
+
+**权衡。** 代价是打包体积：`onnxruntime` jar 含全平台原生库约 93 MB，DJL tokenizers 约 19 MB，最终自包含 JAR 从约 17 MB 增至约 130 MB。换来的是运行时零外部依赖——用户不再需要 Python 环境和 pip 包。检索层的混合排序、中文 n-gram、概念词典、TF-IDF 和语义高亮等手写逻辑保持不变，本次只替换了 embedding 的推理后端。
+
 ## 6. 索引与检索流程
 
 ```text
@@ -230,6 +258,8 @@ Maven 使用 JDK 17，但系统 PATH 优先指向异常的 Java 21 shim，直接
 - 从模拟 `/models` 接口读取并排序模型列表。
 - 问答请求携带 Bearer Token 和检索上下文。
 - RAG 回答包含引用，引用可以定位到源文件片段。
+- 流式问答先返回引用，再逐块推送增量文本。
+- 流式增量拼接后与最终答案一致，且请求正确设置 `stream=true`。
 
 执行命令：
 
@@ -250,8 +280,11 @@ CourseFeaturesTest: knowledge-base CRUD and RAG API checks passed
 - 当前只解析文本和源码，不解析 PDF、图片、扫描件或 Office 二进制文档。
 - 单个文件上限为 2 MB，超大日志和生成文件会跳过。
 - 索引采用内存线性向量扫描，适合个人知识库；达到几十万片段后应接入 HNSW 近似向量索引。
-- 片段定位会在首次选中时执行一次小批量推理；可在后续版本持久化句子级向量以进一步降低延迟。
-- 远程 RAG API 会接收召回片段；机密资料应使用本地兼容服务。
-- 当前问答使用非流式响应，长回答需要等待完整 JSON 返回。
+- 远程 RAG API 会接收召回片段；机密资料应使用本地兼容服务（这是设计上的安全边界，非缺陷）。
 - API Key 加密是应用级保护，尚未接入 Windows Credential Manager。
 - 可以继续加入文件变更监听、索引增量更新、PDF 解析和 OCR。
+
+已在 5.8 优化的项：
+
+- 问答已支持流式响应，长回答逐字显示并可随时停止；不支持 SSE 的服务自动回退到非流式。
+- 片段定位在同一查询下加入结果级缓存，切换结果不再重复推理；索引重建或恢复时缓存清空。

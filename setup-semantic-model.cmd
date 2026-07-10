@@ -2,16 +2,18 @@
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
-set "HF_ENDPOINT=https://hf-mirror.com"
+if "%HF_ENDPOINT%"=="" set "HF_ENDPOINT=https://hf-mirror.com"
 
-python -c "import numpy, onnxruntime, tokenizers, huggingface_hub" >nul 2>&1
-if errorlevel 1 (
-    echo Installing local inference dependencies...
-    python -m pip install numpy onnxruntime tokenizers huggingface_hub
+if not exist "target\SimpleRAG-1.0-SNAPSHOT.jar" (
+    echo Building SimpleRAG...
+    call mvn.cmd -q -DskipTests package
     if errorlevel 1 exit /b 1
 )
 
-python scripts\download_model.py --target models\multilingual-minilm
+set "JAVA_LAUNCHER=java"
+if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA_LAUNCHER=%JAVA_HOME%\bin\java.exe"
+
+"%JAVA_LAUNCHER%" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" com.simplerag.embedding.ModelDownloader models\multilingual-minilm
 if errorlevel 1 exit /b 1
 
 echo.
