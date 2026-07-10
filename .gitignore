@@ -1,0 +1,85 @@
+# Maven / Java build output
+/target/
+**/target/
+/build/
+**/build/
+/out/
+*.class
+*.jar
+*.war
+*.ear
+!/.mvn/wrapper/maven-wrapper.jar
+
+# Project-local Maven dependency cache (keep .mvn/maven.config and wrapper files)
+/.mvn/repository/
+
+# Downloaded local embedding models and temporary model cache
+/models/
+/.cache/
+
+# SimpleRAG runtime data when configured inside the repository
+/.simplerag/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Python runtime caches and local environments
+__pycache__/
+*.py[cod]
+*.pyd
+/.venv/
+/venv/
+/env/
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs, crash dumps, and temporary downloads
+*.log
+*.tmp
+*.temp
+*.part
+*.bak
+*.swp
+*.swo
+hs_err_pid*
+replay_pid*
+
+# IntelliJ IDEA
+/.idea/
+*.iws
+*.iml
+*.ipr
+
+# Eclipse / Spring Tool Suite
+/.apt_generated/
+/.classpath
+/.factorypath
+/.project
+/.settings/
+/.springBeans
+/.sts4-cache/
+
+# NetBeans / Gradle IDE metadata
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+/.gradle/
+
+# VS Code and local agent metadata
+/.vscode/
+/.agents/
+/.codex/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
