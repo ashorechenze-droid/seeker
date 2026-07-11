@@ -161,7 +161,14 @@ public final class AppRepository implements com.simplerag.application.port.out.K
         return new KnowledgeBase(rows.getString("id"), rows.getString("name"), rows.getString("description"),
                 rows.getLong("created_at"), rows.getLong("updated_at"), rows.getLong("source_revision"),
                 published == null ? null : ((Number) published).longValue(),
-                IndexStatus.valueOf(rows.getString("index_status")), rows.getString("last_index_error"));
+                IndexStatus.valueOf(rows.getString("index_status")), rows.getString("last_index_error"),
+                rows.getString("last_verified_source_hash"), nullableLong(rows, "last_verified_at"),
+                rows.getString("freshness_reason"));
+    }
+
+    private static Long nullableLong(ResultSet rows, String column) throws SQLException {
+        Object value = rows.getObject(column);
+        return value == null ? null : ((Number) value).longValue();
     }
 
     private static String requireName(String name) {
@@ -175,7 +182,8 @@ public final class AppRepository implements com.simplerag.application.port.out.K
         try (PreparedStatement touch = connection.prepareStatement("""
                 UPDATE knowledge_base
                 SET updated_at = ?, source_revision = source_revision + 1,
-                    index_status = 'DIRTY', last_index_error = ''
+                    index_status = 'DIRTY', last_index_error = '',
+                    freshness_reason = '数据源配置已变化，需要重建索引'
                 WHERE id = ?
                 """)) {
             touch.setLong(1, System.currentTimeMillis());
@@ -213,6 +221,50 @@ public final class AppRepository implements com.simplerag.application.port.out.K
         updateStatus(knowledgeBaseId, IndexStatus.DIRTY, error);
     }
 
+    public boolean markIndexDirtyIfCurrent(String knowledgeBaseId, long sourceRevision, String reason,
+                                           String observedSourceHash, Long verifiedAt) {
+        String sql = """
+                UPDATE knowledge_base
+                SET index_status = 'DIRTY', last_index_error = ?, freshness_reason = ?,
+                    last_verified_source_hash = COALESCE(?, last_verified_source_hash),
+                    last_verified_at = COALESCE(?, last_verified_at), updated_at = ?
+                WHERE id = ? AND source_revision = ?
+                  AND index_status IN ('READY', 'BUILDING', 'FAILED', 'DIRTY')
+                """;
+        try (Connection connection = database.connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            String message = reason == null ? "源文件状态无法证明，需要重建索引" : reason;
+            statement.setString(1, message);
+            statement.setString(2, message);
+            statement.setObject(3, observedSourceHash == null || observedSourceHash.isBlank() ? null : observedSourceHash);
+            statement.setObject(4, verifiedAt);
+            statement.setLong(5, System.currentTimeMillis());
+            statement.setString(6, knowledgeBaseId);
+            statement.setLong(7, sourceRevision);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException failure) {
+            throw new DataAccessException("无法标记源文件变化", failure);
+        }
+    }
+
+    public void recordSourceVerification(String knowledgeBaseId, long sourceRevision, String sourceHash,
+                                         long verifiedAt) {
+        String sql = """
+                UPDATE knowledge_base
+                SET last_verified_source_hash = ?, last_verified_at = ?,
+                    freshness_reason = CASE WHEN index_status = 'READY' THEN '' ELSE freshness_reason END
+                WHERE id = ? AND source_revision = ?
+                """;
+        try (Connection connection = database.connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sourceHash);
+            statement.setLong(2, verifiedAt);
+            statement.setString(3, knowledgeBaseId);
+            statement.setLong(4, sourceRevision);
+            statement.executeUpdate();
+        } catch (SQLException failure) {
+            throw new DataAccessException("无法记录源文件核对结果", failure);
+        }
+    }
+
     public boolean publishIndex(IndexManifest manifest, String fileName) {
         String insert = """
                 INSERT INTO knowledge_index(knowledge_base_id, revision, file_name, source_set_hash,
@@ -226,8 +278,9 @@ public final class AppRepository implements com.simplerag.application.port.out.K
                 """;
         String publish = """
                 UPDATE knowledge_base SET published_index_revision = ?, index_status = 'READY',
-                  last_index_error = '', updated_at = ?
-                WHERE id = ? AND source_revision = ?
+                  last_index_error = '', freshness_reason = '', last_verified_source_hash = ?,
+                  last_verified_at = ?, updated_at = ?
+                WHERE id = ? AND source_revision = ? AND index_status = 'BUILDING'
                 """;
         try (Connection connection = database.connect()) {
             connection.setAutoCommit(false);
@@ -246,9 +299,11 @@ public final class AppRepository implements com.simplerag.application.port.out.K
             int changed;
             try (PreparedStatement statement = connection.prepareStatement(publish)) {
                 statement.setLong(1, manifest.sourceRevision());
-                statement.setLong(2, System.currentTimeMillis());
-                statement.setString(3, manifest.knowledgeBaseId());
-                statement.setLong(4, manifest.sourceRevision());
+                statement.setString(2, manifest.sourceSetHash());
+                statement.setLong(3, System.currentTimeMillis());
+                statement.setLong(4, System.currentTimeMillis());
+                statement.setString(5, manifest.knowledgeBaseId());
+                statement.setLong(6, manifest.sourceRevision());
                 changed = statement.executeUpdate();
             }
             if (changed != 1) {

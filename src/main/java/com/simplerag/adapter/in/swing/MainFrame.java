@@ -91,6 +91,7 @@ public final class MainFrame extends JFrame {
     private final JLabel statsLabel = new JLabel("0 个文件 · 0 个片段");
     private final JLabel statusLabel = new JLabel("就绪");
     private final JLabel semanticLabel = new JLabel("语义模型检查中");
+    private final JLabel freshnessLabel = new JLabel("源文件检查中");
     private final JProgressBar progressBar = new JProgressBar();
     private final JTextArea previewArea = new JTextArea();
     private final JTextArea lineNumbers = new JTextArea();
@@ -112,6 +113,7 @@ public final class MainFrame extends JFrame {
     private final JButton askButton = new JButton("发送问题");
     private final Timer searchTimer;
     private final Timer statusResetTimer;
+    private final Timer freshnessTimer;
     private boolean refreshingKnowledgeBases;
     private SwingWorker<List<SearchResult>, Void> searchWorker;
     private SwingWorker<List<SemanticHighlight>, Void> highlightWorker;
@@ -127,6 +129,9 @@ public final class MainFrame extends JFrame {
         searchTimer.setRepeats(false);
         this.statusResetTimer = new Timer(4000, event -> statusLabel.setText("就绪"));
         statusResetTimer.setRepeats(false);
+        this.freshnessTimer = new Timer(1000, event -> refreshFreshnessStatus());
+        freshnessTimer.setCoalesce(true);
+        freshnessTimer.start();
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setMinimumSize(new Dimension(1120, 680));
@@ -475,11 +480,14 @@ public final class MainFrame extends JFrame {
         statusLabel.setForeground(Theme.MUTED);
         statusLabel.setFont(Theme.UI_FONT.deriveFont(10f));
         semanticLabel.setFont(Theme.UI_FONT.deriveFont(Font.BOLD, 10f));
+        freshnessLabel.setFont(Theme.UI_FONT.deriveFont(Font.BOLD, 10f));
+        freshnessLabel.setForeground(Theme.MUTED);
         JLabel local = new JLabel("LOCAL INDEX");
         local.setForeground(Theme.MUTED);
         local.setFont(Theme.UI_FONT.deriveFont(Font.BOLD, 9f));
         JPanel indicators = new JPanel(new FlowLayout(FlowLayout.RIGHT, 14, 0));
         indicators.setOpaque(false);
+        indicators.add(freshnessLabel);
         indicators.add(semanticLabel);
         indicators.add(local);
         bar.add(statusLabel, BorderLayout.WEST);
@@ -590,12 +598,27 @@ public final class MainFrame extends JFrame {
         statsLabel.setText(stats.files() + " 个文件  ·  " + stats.chunks() + " 个片段");
         semanticLabel.setText(knowledgeController.semanticStatus());
         semanticLabel.setForeground(knowledgeController.semanticEnabled() ? Theme.ACCENT : Theme.AMBER);
+        freshnessLabel.setText(knowledgeController.freshnessStatus());
+        freshnessLabel.setForeground(knowledgeController.current().freshnessReason().isBlank()
+                ? Theme.MUTED : Theme.AMBER);
         Object selected = extensionFilter.getSelectedItem();
         DefaultComboBoxModel<String> filters = new DefaultComboBoxModel<>();
         filters.addElement("全部");
         knowledgeController.extensions().forEach(filters::addElement);
         extensionFilter.setModel(filters);
         if (selected != null) extensionFilter.setSelectedItem(selected);
+    }
+
+    private void refreshFreshnessStatus() {
+        try {
+            semanticLabel.setText(knowledgeController.semanticStatus());
+            semanticLabel.setForeground(knowledgeController.semanticEnabled() ? Theme.ACCENT : Theme.AMBER);
+            freshnessLabel.setText(knowledgeController.freshnessStatus());
+            KnowledgeBase current = knowledgeController.current();
+            freshnessLabel.setForeground(current != null && !current.freshnessReason().isBlank()
+                    ? Theme.AMBER : Theme.MUTED);
+        } catch (RuntimeException ignored) {
+        }
     }
 
     private void createKnowledgeBase() {

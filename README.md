@@ -47,6 +47,10 @@ mvn.cmd -q package
 
 添加或移除数据源后，数据库会在同一事务中递增 `source_revision`，索引立即变为 `DIRTY`。界面随后可以重建索引；在重建完成前，系统不会把旧索引伪装成最新版本。
 
+应用运行期间会为当前知识库递归注册文件监听器，并用周期性完整 reconciliation 补偿 Windows watcher 溢出、休眠恢复和不可靠文件系统事件。源文件被创建、修改或删除后，无需重启应用，活动索引会及时变为 `DIRTY`。新建子目录也会自动继续注册监听。
+
+底部状态栏显示变化原因和最近一次源文件核对时间。监听器不可用、根目录不可访问、事件溢出尚未核对完成或 freshness 状态未知时，系统采用保守策略，不允许远程 RAG。
+
 ### 2. 重建索引
 
 重建会捕获不可变的：
@@ -107,7 +111,7 @@ POST <baseUrl>/chat/completions
 
 问答时最多召回 6 个片段，发送问题、片段路径、行号和内容，并要求模型用 `[1]`、`[2]` 标注引用。回答支持 SSE 流式显示和随时停止；服务不支持 SSE 时自动回退到非流式响应。
 
-远程 RAG 只允许使用 `READY` 且 `published_index_revision == source_revision` 的索引。`DIRTY`、`BUILDING`、`FAILED`、`INCOMPATIBLE` 或缺失索引时，请求会在任何远程调用前被拒绝。
+远程 RAG 只允许使用 `READY`、`published_index_revision == source_revision` 且运行期 freshness 已被证明的索引。系统在召回前和实际 HTTP 发送前各执行一次 freshness gate；`DIRTY`、`BUILDING`、`FAILED`、`INCOMPATIBLE`、监控中断或核对状态未知时，请求会在任何远程调用前被拒绝。
 
 安全边界：
 
@@ -121,7 +125,7 @@ POST <baseUrl>/chat/completions
 | 状态 | 含义 | 向量检索 | 远程 RAG |
 | --- | --- | --- | --- |
 | `EMPTY` | 从未建立索引 | 否 | 否 |
-| `READY` | 已发布索引与当前 revision 一致 | 模型兼容时允许 | 允许 |
+| `READY` | 已发布索引与当前 revision 一致，且 watcher/reconciliation 可证明源文件未变化 | 模型兼容时允许 | freshness gate 通过时允许 |
 | `DIRTY` | 数据源或外部文件已变化 | 否，词法模式可用 | 否 |
 | `BUILDING` | 正在构建指定 revision | 当前界面不发布新结果 | 否 |
 | `FAILED` | 最近一次构建失败，旧发布版本仍保留 | 否，词法模式可用 | 否 |
@@ -129,7 +133,7 @@ POST <baseUrl>/chat/completions
 
 应用启动时会清理中断构建留下的 `.tmp` 和未被数据库引用的 revision 文件。旧版缺少完整 manifest 的索引不会被静默当作兼容向量索引，而是要求重建。
 
-外部文件内容变化会在下次启动或重建身份校验时被识别；当前版本尚未启用实时文件监听器。
+watcher 只负责使旧索引失效，不会直接修改或发布索引。用户点击重建后仍走临时文件、原子移动和 SQLite 条件发布流程；构建期间发生的文件事件会使发布条件失败，不能把较新的 `DIRTY` 错误覆盖成 `READY`。
 
 ## 支持的内容
 
@@ -151,7 +155,7 @@ POST <baseUrl>/chat/completions
 | 版本化索引 | `%USERPROFILE%\.simplerag\indexes\<知识库ID>\<revision>.bin` |
 | 可执行 JAR | `D:\SimpleRAG\target\SimpleRAG-1.0-SNAPSHOT.jar` |
 
-SQLite 使用版本化 migration。`knowledge_base` 保存 `source_revision`、`published_index_revision`、`index_status` 和最近错误；`knowledge_index` 保存每个已发布 revision 的 manifest 元数据。
+SQLite 使用版本化 migration。`knowledge_base` 保存 `source_revision`、`published_index_revision`、`index_status`、最近错误、`last_verified_source_hash`、`last_verified_at` 和 freshness 变化原因；`knowledge_index` 保存每个已发布 revision 的 manifest 元数据。
 
 ## 架构
 
@@ -190,6 +194,8 @@ bootstrap.AppCompositionRoot
 脚本依次运行：
 
 - JUnit 5 一致性、迁移、失败、取消、隐私和过期任务测试；
+- 递归 watcher、动态子目录、`OVERFLOW` 完整核对和周期 reconciliation 测试；
+- 同会话修改/删除文件、监控关闭时远程请求数为 0，以及构建期间文件变化的竞态测试；
 - ArchUnit 依赖方向检查；
 - 原有 `SemanticSearchEngineTest` 真实 ONNX 跨语言检索入口；
 - 原有 `CourseFeaturesTest` SQLite、模拟 OpenAI JSON/SSE 和引用入口。

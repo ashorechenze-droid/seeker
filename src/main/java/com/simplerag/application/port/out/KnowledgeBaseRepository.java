@@ -20,6 +20,9 @@ public interface KnowledgeBaseRepository {
     void markIndexBuildFailed(String knowledgeBaseId, long revision, String error);
     void markIndexIncompatible(String knowledgeBaseId, String error);
     void markIndexDirty(String knowledgeBaseId, String error);
+    boolean markIndexDirtyIfCurrent(String knowledgeBaseId, long sourceRevision, String reason,
+                                    String observedSourceHash, Long verifiedAt);
+    void recordSourceVerification(String knowledgeBaseId, long sourceRevision, String sourceHash, long verifiedAt);
     boolean publishIndex(IndexManifest manifest, String fileName);
     Optional<String> findIndexFile(String knowledgeBaseId, long revision);
     Path databasePath();

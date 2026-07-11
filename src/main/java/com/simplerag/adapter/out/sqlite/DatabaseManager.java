@@ -89,6 +89,13 @@ public final class DatabaseManager {
                                 )
                                 """);
                         statement.executeUpdate("UPDATE schema_version SET version = 2");
+                        version = 2;
+                    }
+                    if (version < 3) {
+                        statement.executeUpdate("ALTER TABLE knowledge_base ADD COLUMN last_verified_source_hash TEXT NOT NULL DEFAULT ''");
+                        statement.executeUpdate("ALTER TABLE knowledge_base ADD COLUMN last_verified_at INTEGER");
+                        statement.executeUpdate("ALTER TABLE knowledge_base ADD COLUMN freshness_reason TEXT NOT NULL DEFAULT ''");
+                        statement.executeUpdate("UPDATE schema_version SET version = 3");
                     }
                     connection.commit();
                 } catch (Exception failure) {

@@ -16,6 +16,7 @@ import com.simplerag.search.EmbeddingModelSignature;
 import com.simplerag.search.IndexManifest;
 import com.simplerag.search.IndexSnapshot;
 import com.simplerag.search.SemanticSearchEngine;
+import com.simplerag.support.ImmediateFreshnessMonitor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -49,6 +50,9 @@ class IndexConsistencyTest {
         assertEquals(0, migrated.sourceRevision());
         assertNull(migrated.publishedIndexRevision());
         assertEquals(IndexStatus.EMPTY, migrated.indexStatus());
+        assertEquals("", migrated.lastVerifiedSourceHash());
+        assertNull(migrated.lastVerifiedAt());
+        assertEquals("", migrated.freshnessReason());
     }
 
     @Test
@@ -68,6 +72,8 @@ class IndexConsistencyTest {
         assertEquals(IndexStatus.READY, service.indexStatus());
         KnowledgeBase published = service.currentKnowledgeBase();
         assertEquals(published.sourceRevision(), published.publishedIndexRevision());
+        assertFalse(published.lastVerifiedSourceHash().isBlank());
+        assertNotNull(published.lastVerifiedAt());
         assertTrue(Files.isRegularFile(temporaryDirectory.resolve("indexes")
                 .resolve(published.id()).resolve(published.sourceRevision() + ".bin")));
 
@@ -266,7 +272,8 @@ class IndexConsistencyTest {
     private KnowledgeService service(DatabaseManager database, EmbeddingProvider provider) {
         AppRepository repository = new AppRepository(database);
         return new KnowledgeService(provider, repository, repository, new SecretCodec(),
-                new OpenAiCompatibleClient(), new FileSystemIndexRepository(temporaryDirectory.resolve("indexes")));
+                new OpenAiCompatibleClient(), new FileSystemIndexRepository(temporaryDirectory.resolve("indexes")),
+                new ImmediateFreshnessMonitor());
     }
 
     private static final class FakeEmbeddingProvider implements EmbeddingProvider {

@@ -44,6 +44,7 @@ public final class KnowledgeController {
     public boolean semanticEnabled() { return readModel.semanticEnabled(); }
     public boolean semanticModelConfigured() { return readModel.semanticModelConfigured(); }
     public String semanticStatus() { return readModel.semanticStatus(); }
+    public String freshnessStatus() { return readModel.freshnessStatus(); }
     public TaskIdentity identity() {
         KnowledgeBase current = readModel.currentKnowledgeBase();
         return new TaskIdentity(current.id(), readModel.sourceRevision());

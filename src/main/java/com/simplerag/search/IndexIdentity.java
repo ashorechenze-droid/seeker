@@ -25,7 +25,15 @@ public final class IndexIdentity {
             for (Path source : sources.stream().map(Path::toAbsolutePath).map(Path::normalize)
                     .sorted(Comparator.comparing(Path::toString)).toList()) {
                 update(digest, source.toString());
-                if (!Files.isDirectory(source)) continue;
+                if (!Files.exists(source)) {
+                    update(digest, "missing");
+                    continue;
+                }
+                if (!Files.isDirectory(source)) {
+                    update(digest, "not-directory");
+                    continue;
+                }
+                update(digest, "directory");
                 try (var paths = Files.walk(source)) {
                     for (Path path : paths.filter(Files::isRegularFile)
                             .filter(path -> !containsIgnoredDirectory(source, path))
@@ -57,5 +65,12 @@ public final class IndexIdentity {
             if (IGNORED_DIRECTORIES.contains(part.toString().toLowerCase(Locale.ROOT))) return true;
         }
         return false;
+    }
+
+    public static boolean isIgnored(Path root, Path path) {
+        Path normalizedRoot = root.toAbsolutePath().normalize();
+        Path normalizedPath = path.toAbsolutePath().normalize();
+        return normalizedPath.startsWith(normalizedRoot)
+                && containsIgnoredDirectory(normalizedRoot, normalizedPath);
     }
 }

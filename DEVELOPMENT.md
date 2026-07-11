@@ -40,7 +40,7 @@ IndexFormatVersion
 
 ## 3. 数据模型与 migration
 
-`DatabaseManager` 维护 `schema_version`，migration 在事务中按顺序执行。当前 schema 为版本 2。
+`DatabaseManager` 维护 `schema_version`，migration 在事务中按顺序执行。当前 schema 为版本 3。
 
 `knowledge_base` 新增：
 
@@ -49,6 +49,9 @@ source_revision INTEGER NOT NULL DEFAULT 0
 published_index_revision INTEGER
 index_status TEXT NOT NULL DEFAULT 'EMPTY'
 last_index_error TEXT NOT NULL DEFAULT ''
+last_verified_source_hash TEXT NOT NULL DEFAULT ''
+last_verified_at INTEGER
+freshness_reason TEXT NOT NULL DEFAULT ''
 ```
 
 发布记录保存在：
@@ -73,7 +76,7 @@ CREATE TABLE knowledge_index (
 1. 修改数据源记录。
 2. `source_revision = source_revision + 1`。
 3. `index_status = 'DIRTY'`。
-4. 清空最近索引错误。
+4. 清空最近索引错误并记录“数据源配置已变化”的 freshness 原因。
 
 重复添加同一路径或删除不存在的路径不会虚增 revision。
 
@@ -133,7 +136,20 @@ manifest.sourceRevision == source_revision
 manifest.sourceSetHash == 当前数据源签名
 ```
 
-`IndexIdentity.sourceSetHash` 会对规范化数据源路径以及其中普通文件的相对路径、大小和修改时间进行哈希，并跳过常见生成目录。应用重启时若外部文件发生变化，状态会变为 `DIRTY`。
+`IndexIdentity.sourceSetHash` 会对规范化数据源路径、目录存在状态，以及其中普通文件的相对路径、大小和修改时间进行哈希，并跳过常见生成目录。应用启动、构建发布前和运行期 reconciliation 都使用同一身份算法。
+
+### 5.1 运行期 freshness
+
+`SourceFreshnessMonitor` 是 application output port，生产 adapter 为 `FileSystemSourceFreshnessMonitor`。它为每个源目录及现有子目录注册 Java NIO `WatchService`，新建目录后继续递归注册，并组合两条检测路径：
+
+```text
+低延迟 watcher 事件
+周期性 FreshnessReconciler 完整 sourceSetHash 核对
+```
+
+普通文件创建、修改或删除事件会立即把 monitor proof 固定为 `CHANGED`，直到下一次构建重新建立基线。即使文件大小相同、mtime 被恢复，也不会因为快速 fingerprint 相同而重新放行。空目录创建等不能直接证明内容变化的事件会 debounce 后核对；`OVERFLOW`、watch key 失效、根目录不可访问或核对异常会进入 `VERIFYING`/`UNAVAILABLE`，远程调用采用保守拒绝。
+
+monitor session 使用递增 epoch。切换知识库或发布新 revision 后，旧 session 的延迟回调会被丢弃，不能覆盖新状态。监听器发现变化时只条件更新当前 `source_revision` 为 `DIRTY` 并使活动 `IndexHandle` stale，不写索引文件。
 
 ## 6. 版本化构建与原子发布
 
@@ -159,8 +175,10 @@ public record IndexBuildRequest(
 6. 再次计算 source set hash，拒绝构建期间发生的外部文件变化。
 7. 写 `<revision>.bin.tmp` 并关闭输出流。
 8. 使用 `ATOMIC_MOVE` 发布为 `<revision>.bin`；文件系统不支持原子移动时构建失败，不执行非原子覆盖。
-9. 在 SQLite 事务中再次校验 `source_revision`，写 `knowledge_index` 并更新发布指针。
+9. 在 SQLite 事务中再次校验 `source_revision` 和状态仍为 `BUILDING`，写 `knowledge_index` 并更新发布指针。
 10. 事务提交后，才替换当前内存 `IndexHandle`。
+
+开始构建时 monitor 基线切换到 `IndexBuildRequest.sourceSetHash`。发布成功后则以 manifest 中的 hash 启动新 session，并立即完整核对；因此最终 hash 计算与 SQLite 发布之间发生的文件变化也不会被新 monitor 基线掩盖。
 
 磁盘路径：
 
@@ -191,9 +209,11 @@ status == READY
 published_index_revision != null
 published_index_revision == source_revision
 任务 knowledgeBaseId/sourceRevision == 当前 IndexHandle
+SourceFreshnessMonitor proof == VERIFIED
+proof knowledgeBaseId/sourceRevision == 当前任务
 ```
 
-任一条件不满足都抛出本地错误。`DIRTY`、`BUILDING`、`FAILED` 和 `INCOMPATIBLE` 状态不会静默使用旧片段调用远程 API。
+任一条件不满足都抛出本地错误。`KnowledgeService` 在召回前检查一次，并在 citations 准备完成、调用 `ChatModel` 前再次检查，缩小异步文件事件期间的发送窗口。`DIRTY`、`BUILDING`、`FAILED`、`INCOMPATIBLE`、`VERIFYING`、`UNAVAILABLE` 和 `STOPPED` 状态不会静默使用旧片段调用远程 API。
 
 允许调用时只发送最多 6 个召回片段的路径、行号、内容和用户问题，不发送整个知识库。API Key 使用 AES-GCM 加密存储；其安全级别是应用级本地保护，不是操作系统凭据保险库。
 
@@ -232,7 +252,11 @@ com.simplerag
 │  │  ├─ IndexRepository
 │  │  ├─ TextEmbedder
 │  │  ├─ ChatModel
-│  │  └─ SecretStore
+│  │  ├─ SecretStore
+│  │  └─ SourceFreshnessMonitor
+│  ├─ freshness
+│  │  ├─ SourceFingerprint / FreshnessSnapshot
+│  │  └─ FreshnessGate
 │  └─ usecase
 │     └─ KnowledgeService
 ├─ adapter.in.swing
@@ -243,7 +267,7 @@ com.simplerag
 │  └─ Theme / ThemeBootstrap
 ├─ adapter.out
 │  ├─ sqlite
-│  ├─ filesystem
+│  ├─ filesystem (revision index + WatchService/reconciliation)
 │  ├─ onnx
 │  ├─ openai
 │  └─ security
@@ -316,6 +340,11 @@ mvn.cmd -q test
 - 模型签名不匹配时搜索和高亮不调用 query embedding。
 - embedding 失败时保留旧发布 revision 并阻止 RAG。
 - 外部文件变化在恢复时被识别为 `DIRTY`。
+- `READY` 后同会话修改或删除文件会在限定时间内变为 `DIRTY`。
+- 删除敏感文件后远程 HTTP 请求次数保持为 0。
+- 新建子目录会递归注册，后续文件变化仍可检测。
+- `OVERFLOW` 触发完整 reconciliation，监控关闭或根目录不可访问时 gate 保守拒绝。
+- 构建期间文件事件不能覆盖较新的 `DIRTY`，旧 monitor 回调也不能污染新 `READY`。
 - 切换知识库后旧 identity 的结果被拒绝。
 - 取消构建保留旧发布版本且不残留 `.tmp`。
 - 启动时把中断的 `BUILDING` 恢复为失败状态并清理 `.tmp`。
@@ -352,6 +381,6 @@ CourseFeaturesTest: knowledge-base CRUD and RAG API checks passed
 
 - 不解析 PDF、图片、扫描件或 Office 二进制文档。
 - 索引使用内存线性扫描，适合个人规模知识库；大量片段可后续接入 HNSW。
-- 外部文件变化在启动/重建身份校验时发现，尚未使用实时文件监听器。
+- 当前 watcher/reconciliation 只监控本机当前活动知识库；切换到其他知识库时会重新加载索引并执行完整身份校验。
 - API Key 尚未接入 Windows Credential Manager。
 - Swing 视图仍可继续细分更小的布局组件，但业务调用、任务身份和基础设施依赖已经稳定在 controller/port 边界内，后续视图拆分不需要改变应用层。

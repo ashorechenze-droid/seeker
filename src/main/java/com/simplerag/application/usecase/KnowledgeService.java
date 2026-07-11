@@ -12,7 +12,12 @@ import com.simplerag.application.port.out.IndexRepository;
 import com.simplerag.application.port.out.KnowledgeBaseRepository;
 import com.simplerag.application.port.out.SecretStore;
 import com.simplerag.application.port.out.SettingsRepository;
+import com.simplerag.application.port.out.SourceFreshnessMonitor;
 import com.simplerag.application.port.out.TextEmbedder;
+import com.simplerag.application.freshness.FreshnessGate;
+import com.simplerag.application.freshness.FreshnessSnapshot;
+import com.simplerag.application.freshness.FreshnessState;
+import com.simplerag.application.freshness.SourceFingerprint;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.KnowledgeStats;
@@ -41,7 +46,7 @@ import java.util.function.Consumer;
 
 /** Application-layer facade for knowledge-base, retrieval and RAG use cases. */
 public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowledgeSources,
-        RebuildKnowledgeIndex, SearchKnowledge, AskKnowledge, ManageApiSettings, DesktopReadModel {
+        RebuildKnowledgeIndex, SearchKnowledge, AskKnowledge, ManageApiSettings, DesktopReadModel, AutoCloseable {
     private static final String ACTIVE_KB = "active_knowledge_base";
     private static final String API_URL = "api.base_url";
     private static final String API_KEY = "api.encrypted_key";
@@ -53,19 +58,24 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     private final SecretStore secretCodec;
     private final ChatModel apiClient;
     private final IndexRepository indexRepository;
+    private final SourceFreshnessMonitor freshnessMonitor;
+    private final FreshnessGate freshnessGate;
+    private final java.util.concurrent.atomic.AtomicLong freshnessEpoch = new java.util.concurrent.atomic.AtomicLong();
     private SemanticSearchEngine engine;
     private KnowledgeBase activeKnowledgeBase;
     private volatile IndexHandle activeHandle;
 
     public KnowledgeService(TextEmbedder embeddingProvider, KnowledgeBaseRepository repository,
                             SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
-                            IndexRepository indexRepository) {
+                            IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor) {
         this.embeddingProvider = embeddingProvider;
         this.repository = repository;
         this.settings = settings;
         this.secretCodec = secretCodec;
         this.apiClient = apiClient;
         this.indexRepository = indexRepository;
+        this.freshnessMonitor = freshnessMonitor;
+        this.freshnessGate = new FreshnessGate(freshnessMonitor);
         this.engine = new SemanticSearchEngine(embeddingProvider);
     }
 
@@ -122,12 +132,14 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         requireActive();
         repository.addSource(activeKnowledgeBase.id(), path);
         refreshAfterSourceChange();
+        startFreshnessMonitoring();
     }
 
     public void removeSource(Path path) {
         requireActive();
         repository.removeSource(activeKnowledgeBase.id(), path);
         refreshAfterSourceChange();
+        startFreshnessMonitoring();
     }
 
     public SemanticSearchEngine.IndexReport rebuildCurrent(
@@ -144,6 +156,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         List<Path> capturedSources = repository.listSources(target.id());
         IndexBuildRequest request = new IndexBuildRequest(target.id(), target.sourceRevision(), capturedSources,
                 IndexIdentity.sourceSetHash(capturedSources), embeddingProvider.signature());
+        startFreshnessMonitoring(target, capturedSources, request.sourceSetHash());
         if (!repository.beginIndexBuild(request.knowledgeBaseId(), request.sourceRevision())) {
             throw new StaleTaskException("数据源已变化，请重新开始索引构建");
         }
@@ -178,6 +191,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                             IndexStatus.READY, builder);
                 }
             }
+            startFreshnessMonitoringAfterPublish(manifest);
             return report;
         } catch (IOException | RuntimeException failure) {
             if (failure instanceof StaleTaskException || failure instanceof InterruptedIOException) {
@@ -218,7 +232,9 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
 
     public RagAnswer ask(String question, ApiConfig config) throws IOException, InterruptedException {
         IndexHandle handle = requireReadyHandle();
-        return apiClient.answer(config, question, retrieveCitations(handle, question));
+        List<RagCitation> citations = retrieveCitations(handle, question);
+        freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
+        return apiClient.answer(config, question, citations);
     }
 
     /**
@@ -238,6 +254,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         IndexHandle handle = requireReadyHandle(knowledgeBaseId, expectedRevision);
         List<RagCitation> citations = retrieveCitations(handle, question);
         if (onCitations != null) onCitations.accept(citations);
+        freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
         return apiClient.answerStream(config, question, citations, onDelta);
     }
 
@@ -296,6 +313,29 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         return handle.engine().semanticStatus();
     }
 
+    public String freshnessStatus() {
+        FreshnessSnapshot freshness = freshnessMonitor.snapshot();
+        KnowledgeBase knowledgeBase = activeKnowledgeBase;
+        if (knowledgeBase != null && knowledgeBase.freshnessReason() != null
+                && !knowledgeBase.freshnessReason().isBlank()) {
+            return knowledgeBase.freshnessReason() + verifiedAtSuffix(knowledgeBase.lastVerifiedAt());
+        }
+        if (freshness.state() == FreshnessState.VERIFIED && freshness.verifiedAt() > 0) {
+            return "源文件已核对 · " + java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+                    .withZone(java.time.ZoneId.systemDefault())
+                    .format(java.time.Instant.ofEpochMilli(freshness.verifiedAt()));
+        }
+        return freshness.reason();
+    }
+
+    private static String verifiedAtSuffix(Long verifiedAt) {
+        if (verifiedAt == null || verifiedAt <= 0) return "";
+        String time = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+                .withZone(java.time.ZoneId.systemDefault())
+                .format(java.time.Instant.ofEpochMilli(verifiedAt));
+        return " · 上次核对 " + time;
+    }
+
     public IndexStatus indexStatus() {
         return requireHandle().status();
     }
@@ -339,6 +379,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         if (activeKnowledgeBase.indexStatus() != IndexStatus.READY) engine.markStale();
         activeHandle = new IndexHandle(selected.id(), activeKnowledgeBase.sourceRevision(),
                 activeKnowledgeBase.indexStatus(), engine);
+        startFreshnessMonitoring();
         return snapshot.isPresent();
     }
 
@@ -417,7 +458,71 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                 || latest.publishedIndexRevision() != handle.sourceRevision()) {
             throw new IllegalStateException("当前索引不是最新 READY 状态，已禁止发送远程 RAG 请求");
         }
+        freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
         return handle;
+    }
+
+    private void startFreshnessMonitoring() {
+        KnowledgeBase selected = activeKnowledgeBase;
+        if (selected == null) return;
+        List<Path> sources = repository.listSources(selected.id());
+        String currentHash = IndexIdentity.sourceSetHash(sources);
+        startFreshnessMonitoring(selected, sources, currentHash);
+    }
+
+    private void startFreshnessMonitoring(KnowledgeBase selected, List<Path> sources, String expectedHash) {
+        long epoch = freshnessEpoch.incrementAndGet();
+        SourceFreshnessMonitor.MonitorRequest request = new SourceFreshnessMonitor.MonitorRequest(
+                selected.id(), selected.sourceRevision(), sources, expectedHash);
+        freshnessMonitor.start(request, new SourceFreshnessMonitor.Listener() {
+            @Override
+            public void sourceVerified(SourceFreshnessMonitor.MonitorRequest verifiedRequest,
+                                       SourceFingerprint fingerprint) {
+                if (freshnessEpoch.get() != epoch) return;
+                repository.recordSourceVerification(verifiedRequest.knowledgeBaseId(),
+                        verifiedRequest.sourceRevision(), fingerprint.hash(), fingerprint.verifiedAt());
+                refreshActiveKnowledgeBaseIf(verifiedRequest.knowledgeBaseId());
+            }
+
+            @Override
+            public void sourceInvalidated(SourceFreshnessMonitor.MonitorRequest invalidRequest,
+                                          SourceFingerprint fingerprint, String reason) {
+                if (freshnessEpoch.get() != epoch) return;
+                String observedHash = fingerprint == null ? null : fingerprint.hash();
+                Long verifiedAt = fingerprint == null ? null : fingerprint.verifiedAt();
+                if (repository.markIndexDirtyIfCurrent(invalidRequest.knowledgeBaseId(),
+                        invalidRequest.sourceRevision(), reason, observedHash, verifiedAt)) {
+                    synchronized (KnowledgeService.this) {
+                        if (activeKnowledgeBase != null
+                                && activeKnowledgeBase.id().equals(invalidRequest.knowledgeBaseId())) {
+                            activeKnowledgeBase = repository.findKnowledgeBase(invalidRequest.knowledgeBaseId())
+                                    .orElseThrow();
+                            engine.markStale();
+                            activeHandle = new IndexHandle(activeKnowledgeBase.id(),
+                                    activeKnowledgeBase.sourceRevision(), activeKnowledgeBase.indexStatus(), engine);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    private void startFreshnessMonitoringAfterPublish(IndexManifest manifest) {
+        KnowledgeBase selected;
+        synchronized (this) {
+            if (activeKnowledgeBase == null
+                    || !activeKnowledgeBase.id().equals(manifest.knowledgeBaseId())
+                    || activeKnowledgeBase.sourceRevision() != manifest.sourceRevision()) return;
+            selected = activeKnowledgeBase;
+        }
+        startFreshnessMonitoring(selected, repository.listSources(selected.id()), manifest.sourceSetHash());
+    }
+
+    @Override
+    public void close() {
+        freshnessEpoch.incrementAndGet();
+        freshnessMonitor.close();
+        embeddingProvider.close();
     }
 
     private static void requireIdentity(IndexHandle handle, String knowledgeBaseId, long revision) {

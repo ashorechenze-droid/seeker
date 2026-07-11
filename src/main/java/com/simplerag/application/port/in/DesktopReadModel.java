@@ -17,6 +17,7 @@ public interface DesktopReadModel {
     boolean semanticEnabled();
     boolean semanticModelConfigured();
     String semanticStatus();
+    String freshnessStatus();
     IndexStatus indexStatus();
     long sourceRevision();
     Path databasePath();

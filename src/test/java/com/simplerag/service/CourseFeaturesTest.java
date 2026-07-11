@@ -10,6 +10,7 @@ import com.simplerag.adapter.out.openai.OpenAiCompatibleClient;
 import com.simplerag.adapter.out.sqlite.AppRepository;
 import com.simplerag.adapter.out.sqlite.DatabaseManager;
 import com.simplerag.adapter.out.security.SecretCodec;
+import com.simplerag.support.ImmediateFreshnessMonitor;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -38,7 +39,8 @@ public final class CourseFeaturesTest {
         server.start();
 
         KnowledgeService service = new KnowledgeService(new FakeEmbeddingProvider(), repository, repository,
-                new SecretCodec(), new OpenAiCompatibleClient(), new FileSystemIndexRepository(work.resolve("indexes")));
+                new SecretCodec(), new OpenAiCompatibleClient(), new FileSystemIndexRepository(work.resolve("indexes")),
+                new ImmediateFreshnessMonitor());
         service.restore();
         check(service.currentKnowledgeBase().id().equals(first.id()), "应选择第一个知识库");
 

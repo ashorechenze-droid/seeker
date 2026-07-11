@@ -1,6 +1,7 @@
 package com.simplerag.bootstrap;
 
 import com.simplerag.adapter.out.filesystem.FileSystemIndexRepository;
+import com.simplerag.adapter.out.filesystem.FileSystemSourceFreshnessMonitor;
 import com.simplerag.adapter.in.swing.AskController;
 import com.simplerag.adapter.in.swing.KnowledgeController;
 import com.simplerag.adapter.in.swing.SearchController;
@@ -24,7 +25,9 @@ public final class AppCompositionRoot {
         KnowledgeService service = new KnowledgeService(
                 new Langchain4jOnnxEmbeddingProvider(), sqlite, sqlite, new SecretCodec(),
                 new OpenAiCompatibleClient(), new FileSystemIndexRepository(
-                Path.of(System.getProperty("user.home"), ".simplerag", "indexes")));
+                Path.of(System.getProperty("user.home"), ".simplerag", "indexes")),
+                new FileSystemSourceFreshnessMonitor());
+        Runtime.getRuntime().addShutdownHook(new Thread(service::close, "simplerag-shutdown"));
         service.restore();
         SwingUtilities.invokeLater(() -> {
             MainFrame frame = new MainFrame(

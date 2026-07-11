@@ -14,6 +14,7 @@ import com.simplerag.model.RagCitation;
 import com.simplerag.rag.ApiConfig;
 import com.simplerag.search.IndexManifest;
 import com.simplerag.search.IndexSnapshot;
+import com.simplerag.support.ImmediateFreshnessMonitor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -37,7 +38,7 @@ class KnowledgeServiceUnitTest {
     void applicationUseCaseRunsWithOnlyInMemoryFakes() throws Exception {
         FakePersistence persistence = new FakePersistence(temporaryDirectory);
         KnowledgeService service = new KnowledgeService(new FakeEmbedder(), persistence, persistence,
-                new PlainSecretStore(), new FakeChatModel(), persistence);
+                new PlainSecretStore(), new FakeChatModel(), persistence, new ImmediateFreshnessMonitor());
         service.restore();
         Path source = temporaryDirectory.resolve("source");
         Files.createDirectories(source);
@@ -90,7 +91,7 @@ class KnowledgeServiceUnitTest {
 
     private KnowledgeService service(FakePersistence persistence) {
         KnowledgeService service = new KnowledgeService(new FakeEmbedder(), persistence, persistence,
-                new PlainSecretStore(), new FakeChatModel(), persistence);
+                new PlainSecretStore(), new FakeChatModel(), persistence, new ImmediateFreshnessMonitor());
         service.restore();
         return service;
     }
@@ -117,7 +118,8 @@ class KnowledgeServiceUnitTest {
         @Override public Optional<KnowledgeBase> findKnowledgeBase(String id) { return Optional.ofNullable(knowledgeBases.get(id)); }
         @Override public KnowledgeBase createKnowledgeBase(String name, String description) {
             String id = UUID.randomUUID().toString();
-            KnowledgeBase value = new KnowledgeBase(id, name, description, 1, 1, 0, null, IndexStatus.EMPTY, "");
+            KnowledgeBase value = new KnowledgeBase(id, name, description, 1, 1, 0, null, IndexStatus.EMPTY,
+                    "", "", null, "");
             knowledgeBases.put(id, value);
             sources.put(id, new ArrayList<>());
             return value;
@@ -125,7 +127,8 @@ class KnowledgeServiceUnitTest {
         @Override public KnowledgeBase updateKnowledgeBase(String id, String name, String description) {
             KnowledgeBase old = knowledgeBases.get(id);
             KnowledgeBase value = new KnowledgeBase(id, name, description, old.createdAt(), 2,
-                    old.sourceRevision(), old.publishedIndexRevision(), old.indexStatus(), old.lastIndexError());
+                    old.sourceRevision(), old.publishedIndexRevision(), old.indexStatus(), old.lastIndexError(),
+                    old.lastVerifiedSourceHash(), old.lastVerifiedAt(), old.freshnessReason());
             knowledgeBases.put(id, value);
             return value;
         }
@@ -151,10 +154,28 @@ class KnowledgeServiceUnitTest {
         }
         @Override public void markIndexIncompatible(String id, String error) { status(id, IndexStatus.INCOMPATIBLE, error); }
         @Override public void markIndexDirty(String id, String error) { status(id, IndexStatus.DIRTY, error); }
+        @Override public boolean markIndexDirtyIfCurrent(String id, long revision, String reason,
+                                                         String observedHash, Long verifiedAt) {
+            KnowledgeBase old = knowledgeBases.get(id);
+            if (old.sourceRevision() != revision) return false;
+            knowledgeBases.put(id, new KnowledgeBase(old.id(), old.name(), old.description(), old.createdAt(),
+                    old.updatedAt(), old.sourceRevision(), old.publishedIndexRevision(), IndexStatus.DIRTY,
+                    reason, observedHash == null ? old.lastVerifiedSourceHash() : observedHash,
+                    verifiedAt == null ? old.lastVerifiedAt() : verifiedAt, reason));
+            return true;
+        }
+        @Override public void recordSourceVerification(String id, long revision, String hash, long verifiedAt) {
+            KnowledgeBase old = knowledgeBases.get(id);
+            if (old.sourceRevision() != revision) return;
+            knowledgeBases.put(id, new KnowledgeBase(old.id(), old.name(), old.description(), old.createdAt(),
+                    old.updatedAt(), old.sourceRevision(), old.publishedIndexRevision(), old.indexStatus(),
+                    old.lastIndexError(), hash, verifiedAt,
+                    old.indexStatus() == IndexStatus.READY ? "" : old.freshnessReason()));
+        }
         @Override public boolean publishIndex(IndexManifest manifest, String fileName) {
             if (failPublish) throw new IllegalStateException("injected database publish failure");
             KnowledgeBase old = knowledgeBases.get(manifest.knowledgeBaseId());
-            if (old.sourceRevision() != manifest.sourceRevision()) return false;
+            if (old.sourceRevision() != manifest.sourceRevision() || old.indexStatus() != IndexStatus.BUILDING) return false;
             replace(old, old.sourceRevision(), manifest.sourceRevision(), IndexStatus.READY, "");
             return true;
         }
@@ -187,7 +208,8 @@ class KnowledgeServiceUnitTest {
         }
         private void replace(KnowledgeBase old, long revision, Long published, IndexStatus status, String error) {
             knowledgeBases.put(old.id(), new KnowledgeBase(old.id(), old.name(), old.description(), old.createdAt(),
-                    old.updatedAt(), revision, published, status, error));
+                    old.updatedAt(), revision, published, status, error, old.lastVerifiedSourceHash(),
+                    old.lastVerifiedAt(), status == IndexStatus.READY ? "" : old.freshnessReason()));
         }
     }
 
