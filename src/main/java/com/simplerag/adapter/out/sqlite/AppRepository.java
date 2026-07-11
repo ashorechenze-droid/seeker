@@ -193,7 +193,48 @@ public final class AppRepository implements com.simplerag.application.port.out.K
     }
 
     public boolean beginIndexBuild(String knowledgeBaseId, long revision) {
-        return updateStatusConditionally(knowledgeBaseId, revision, IndexStatus.BUILDING, "");
+        return beginIndexBuildRevision(knowledgeBaseId, revision) != null;
+    }
+
+    @Override
+    public Long beginIndexBuildRevision(String knowledgeBaseId, long expectedRevision) {
+        String update = """
+                UPDATE knowledge_base
+                SET source_revision = CASE
+                      WHEN published_index_revision = source_revision THEN source_revision + 1
+                      ELSE source_revision END,
+                    index_status = 'BUILDING', last_index_error = '', updated_at = ?
+                WHERE id = ? AND source_revision = ?
+                  AND index_status IN ('EMPTY', 'READY', 'DIRTY', 'FAILED', 'INCOMPATIBLE')
+                """;
+        String select = "SELECT source_revision FROM knowledge_base WHERE id = ?";
+        try (Connection connection = database.connect()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(update)) {
+                statement.setLong(1, System.currentTimeMillis());
+                statement.setString(2, knowledgeBaseId);
+                statement.setLong(3, expectedRevision);
+                if (statement.executeUpdate() != 1) {
+                    connection.rollback();
+                    return null;
+                }
+            }
+            long revision;
+            try (PreparedStatement statement = connection.prepareStatement(select)) {
+                statement.setString(1, knowledgeBaseId);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next()) {
+                        connection.rollback();
+                        return null;
+                    }
+                    revision = rows.getLong(1);
+                }
+            }
+            connection.commit();
+            return revision;
+        } catch (SQLException failure) {
+            throw new DataAccessException("无法开始索引构建", failure);
+        }
     }
 
     public void markIndexBuildFailed(String knowledgeBaseId, long revision, String error) {
@@ -225,7 +266,8 @@ public final class AppRepository implements com.simplerag.application.port.out.K
                                            String observedSourceHash, Long verifiedAt) {
         String sql = """
                 UPDATE knowledge_base
-                SET index_status = 'DIRTY', last_index_error = ?, freshness_reason = ?,
+                SET source_revision = source_revision + 1,
+                    index_status = 'DIRTY', last_index_error = ?, freshness_reason = ?,
                     last_verified_source_hash = COALESCE(?, last_verified_source_hash),
                     last_verified_at = COALESCE(?, last_verified_at), updated_at = ?
                 WHERE id = ? AND source_revision = ?

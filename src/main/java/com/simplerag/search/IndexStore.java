@@ -48,7 +48,7 @@ public final class IndexStore {
                 if (snapshot.version() == IndexSnapshot.CURRENT_VERSION) {
                     return Optional.of(snapshot);
                 }
-                if (snapshot.version() == 1 || snapshot.version() == 2) {
+                if (snapshot.version() >= 1 && snapshot.version() < IndexSnapshot.CURRENT_VERSION) {
                     return Optional.of(new IndexSnapshot(IndexSnapshot.CURRENT_VERSION, snapshot.roots(),
                             snapshot.chunks(), snapshot.indexedAt(), "", null));
                 }

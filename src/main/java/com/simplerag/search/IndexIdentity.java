@@ -11,7 +11,7 @@ import java.util.Set;
 import java.util.Locale;
 
 public final class IndexIdentity {
-    public static final int CHUNKING_VERSION = 1;
+    public static final int CHUNKING_VERSION = ChunkerRegistry.CHUNKING_VERSION;
     private static final Set<String> IGNORED_DIRECTORIES = Set.of(
             ".git", ".idea", ".vscode", ".simplerag", "node_modules", "target", "build", "dist",
             "out", "vendor", ".venv", "venv", "__pycache__", ".next", ".gradle");

@@ -11,6 +11,8 @@ import java.util.Set;
 
 /** Selects the existing code-window or prose-paragraph chunking strategy by document type. */
 public final class ChunkerRegistry {
+    public static final int CHUNKING_VERSION = 1;
+
     private static final Set<String> CODE_EXTENSIONS = Set.of(
             "java", "kt", "kts", "py", "js", "jsx", "ts", "tsx", "go", "rs", "c", "h",
             "cpp", "hpp", "cs", "php", "rb", "swift", "scala", "sql", "sh", "bash", "ps1",

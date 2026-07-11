@@ -42,6 +42,7 @@ public final class SemanticSearchEngine {
     private volatile boolean embeddingsActive;
     private volatile boolean semanticCompatible;
     private volatile IndexManifest manifest;
+    private volatile List<DocumentIndexEntry> documentEntries = List.of();
     private String cachedQueryText = "";
     private float[] cachedQueryEmbedding;
 
@@ -73,60 +74,21 @@ public final class SemanticSearchEngine {
     }
 
     public IndexReport index(List<Path> sourceRoots, Consumer<IndexProgress> progress) throws IOException {
-        DocumentScanner.ScanResult scan = documentScanner.scan(sourceRoots);
-        List<DocumentScanner.ScannedDocument> files = scan.documents();
+        return index(sourceRoots, null, progress);
+    }
 
-        List<DocumentChunk> chunks = new ArrayList<>();
-        int processed = 0;
-        int skipped = 0;
-        for (DocumentScanner.ScannedDocument document : files) {
-            checkInterrupted();
-            Path file = document.path();
-            try {
-                DocumentReaderRegistry.ReadDocument read = readerRegistry.read(file, document.root());
-                if (read != null) chunks.addAll(chunkerRegistry.chunk(read));
-            } catch (IOException | RuntimeException unreadable) {
-                skipped++;
-            }
-            processed++;
-            if (progress != null && (processed == files.size() || processed % 10 == 0)) {
-                progress.accept(new IndexProgress(processed, files.size(), file, "扫描"));
-            }
-        }
-
-        embeddingsActive = false;
-        if (embeddingProvider.isConfigured() && !chunks.isEmpty()) {
-            List<DocumentChunk> embeddedChunks = new ArrayList<>(chunks.size());
-            final int batchSize = 24;
-            for (int start = 0; start < chunks.size(); start += batchSize) {
-                checkInterrupted();
-                int end = Math.min(chunks.size(), start + batchSize);
-                List<DocumentChunk> batch = chunks.subList(start, end);
-                List<String> texts = batch.stream()
-                        .map(chunk -> chunk.fileName() + "\n" + chunk.content()).toList();
-                List<float[]> vectors;
-                try {
-                    vectors = embeddingProvider.embed(texts);
-                } catch (IOException failure) {
-                    throw new IOException("生成本地语义向量失败：" + failure.getMessage(), failure);
-                }
-                for (int i = 0; i < batch.size(); i++) {
-                    embeddedChunks.add(batch.get(i).withEmbedding(vectors.get(i)));
-                }
-                if (progress != null) {
-                    progress.accept(new IndexProgress(end, chunks.size(), batch.get(batch.size() - 1).filePath(), "向量化"));
-                }
-            }
-            chunks = embeddedChunks;
-            embeddingsActive = true;
-            semanticCompatible = true;
-        }
-
+    public IndexReport index(List<Path> sourceRoots, IndexSnapshot previous,
+                             Consumer<IndexProgress> progress) throws IOException {
+        IncrementalIndexBuilder.BuildResult result = new IncrementalIndexBuilder(embeddingProvider,
+                documentScanner, readerRegistry, chunkerRegistry).build(sourceRoots, previous, progress);
         clearHighlightCache();
-        this.state = State.build(chunks, lexicalFeatures);
-        this.roots = scan.roots().stream().map(Path::toString).toList();
+        this.state = State.build(result.chunks(), lexicalFeatures);
+        this.roots = result.roots();
         this.indexedAt = System.currentTimeMillis();
-        return new IndexReport(files.size() - skipped, chunks.size(), skipped);
+        this.documentEntries = result.documentEntries();
+        this.embeddingsActive = state.hasEmbeddings;
+        this.semanticCompatible = state.hasEmbeddings && embeddingProvider.isConfigured();
+        return result.report();
     }
 
     public List<SearchResult> search(String query, int limit, String extensionFilter) {
@@ -189,6 +151,7 @@ public final class SemanticSearchEngine {
         this.roots = List.copyOf(snapshot.roots());
         this.indexedAt = snapshot.indexedAt();
         this.manifest = snapshot.manifest();
+        this.documentEntries = snapshot.documentEntries();
         this.semanticCompatible = isSemanticCompatible(snapshot);
         this.embeddingsActive = semanticCompatible;
     }
@@ -196,7 +159,7 @@ public final class SemanticSearchEngine {
     public IndexSnapshot snapshot() {
         List<DocumentChunk> chunks = state.chunks.stream().map(indexed -> indexed.chunk).toList();
         return new IndexSnapshot(IndexSnapshot.CURRENT_VERSION, roots, chunks, indexedAt,
-                state.hasEmbeddings ? embeddingProvider.modelName() : "", manifest);
+                state.hasEmbeddings ? embeddingProvider.modelName() : "", manifest, documentEntries);
     }
 
     public IndexSnapshot snapshot(IndexManifest value) {

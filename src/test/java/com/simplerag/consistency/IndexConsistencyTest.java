@@ -34,6 +34,28 @@ class IndexConsistencyTest {
     Path temporaryDirectory;
 
     @Test
+    void rebuildingReadyIndexAllocatesANewRevision() throws Exception {
+        AppRepository repository = new AppRepository(new DatabaseManager(temporaryDirectory.resolve("rebuild-ready.db")));
+        KnowledgeBase knowledgeBase = repository.createKnowledgeBase("ready", "");
+        Path source = Files.createDirectories(temporaryDirectory.resolve("ready-source"));
+        Files.writeString(source.resolve("note.txt"), "published content for revision allocation");
+        repository.addSource(knowledgeBase.id(), source);
+        KnowledgeBase dirty = repository.findKnowledgeBase(knowledgeBase.id()).orElseThrow();
+        assertTrue(repository.beginIndexBuild(knowledgeBase.id(), dirty.sourceRevision()));
+        IndexManifest manifest = new IndexManifest(knowledgeBase.id(), dirty.sourceRevision(),
+                IndexIdentity.sourceSetHash(List.of(source)), "model", 8, IndexIdentity.CHUNKING_VERSION,
+                IndexSnapshot.CURRENT_VERSION, System.currentTimeMillis());
+        assertTrue(repository.publishIndex(manifest, dirty.sourceRevision() + ".bin"));
+
+        Long rebuildRevision = repository.beginIndexBuildRevision(knowledgeBase.id(), dirty.sourceRevision());
+
+        assertEquals(dirty.sourceRevision() + 1, rebuildRevision);
+        KnowledgeBase rebuilding = repository.findKnowledgeBase(knowledgeBase.id()).orElseThrow();
+        assertEquals(dirty.sourceRevision(), rebuilding.publishedIndexRevision());
+        assertEquals(IndexStatus.BUILDING, rebuilding.indexStatus());
+    }
+
+    @Test
     void migratesLegacyDatabaseAndPreservesRows() throws Exception {
         Path databaseFile = temporaryDirectory.resolve("legacy.db");
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);

@@ -82,7 +82,16 @@ CREATE TABLE knowledge_index (
 
 ## 4. 索引身份与向量兼容
 
-`IndexSnapshot` 格式版本为 3，并包含 `IndexManifest`：
+`IndexSnapshot` 格式版本为 4，并包含 `IndexManifest` 与文件级 `DocumentIndexEntry`。每个 entry 记录：
+
+```text
+root + relativePath
+size + modifiedAt + contentHash(SHA-256)
+readerVersion + chunkingVersion
+chunkIds
+```
+
+`IndexManifest` 继续记录 revision、源集合、模型和格式的全局身份：
 
 ```java
 public record IndexManifest(
@@ -149,7 +158,7 @@ manifest.sourceSetHash == 当前数据源签名
 
 普通文件创建、修改或删除事件会立即把 monitor proof 固定为 `CHANGED`，直到下一次构建重新建立基线。即使文件大小相同、mtime 被恢复，也不会因为快速 fingerprint 相同而重新放行。空目录创建等不能直接证明内容变化的事件会 debounce 后核对；`OVERFLOW`、watch key 失效、根目录不可访问或核对异常会进入 `VERIFYING`/`UNAVAILABLE`，远程调用采用保守拒绝。
 
-monitor session 使用递增 epoch。切换知识库或发布新 revision 后，旧 session 的延迟回调会被丢弃，不能覆盖新状态。监听器发现变化时只条件更新当前 `source_revision` 为 `DIRTY` 并使活动 `IndexHandle` stale，不写索引文件。
+monitor session 使用递增 epoch。切换知识库或发布新 revision 后，旧 session 的延迟回调会被丢弃，不能覆盖新状态。监听器发现变化时会在匹配当前 revision 的条件更新中递增 `source_revision`、标记 `DIRTY` 并使活动 `IndexHandle` stale，但不写索引文件。这样下一次构建使用新的 revision 文件名，失败时不会覆盖仍被数据库引用的旧 snapshot。
 
 ## 6. 版本化构建与原子发布
 
@@ -168,15 +177,17 @@ public record IndexBuildRequest(
 发布顺序：
 
 1. 从 repository 读取并捕获 request。
-2. 条件更新数据库状态为 `BUILDING`。
-3. 创建独立 `SemanticSearchEngine` builder。
-4. 扫描、分块、计算词法特征和 embedding。
-5. 生成完整 manifest。
-6. 再次计算 source set hash，拒绝构建期间发生的外部文件变化。
-7. 写 `<revision>.bin.tmp` 并关闭输出流。
-8. 使用 `ATOMIC_MOVE` 发布为 `<revision>.bin`；文件系统不支持原子移动时构建失败，不执行非原子覆盖。
-9. 在 SQLite 事务中再次校验 `source_revision` 和状态仍为 `BUILDING`，写 `knowledge_index` 并更新发布指针。
-10. 事务提交后，才替换当前内存 `IndexHandle`。
+2. 条件更新数据库状态为 `BUILDING`；若当前 revision 已发布，同时原子分配下一个 revision。
+3. 读取上一已发布 snapshot，并创建独立 `SemanticSearchEngine` builder。
+4. 扫描当前文件并计算 `FileFingerprint`。
+5. `IncrementalIndexPlanner` 纯比较得到 `added/modified/deleted/reused`。
+6. 复用未变化文件的 chunks/embeddings，只读取、分块和向量化新增/修改文件。
+7. 删除项不进入结果，builder 组装完整的新 snapshot 与 manifest。
+8. 再次计算 source set hash，拒绝构建期间发生的外部文件变化。
+9. 写 `<revision>.bin.tmp` 并关闭输出流。
+10. 使用 `ATOMIC_MOVE` 发布为 `<revision>.bin`；文件系统不支持原子移动时构建失败，不执行非原子覆盖。
+11. 在 SQLite 事务中再次校验 `source_revision` 和状态仍为 `BUILDING`，写 `knowledge_index` 并更新发布指针。
+12. 事务提交后，才替换当前内存 `IndexHandle`。
 
 开始构建时 monitor 基线切换到 `IndexBuildRequest.sourceSetHash`。发布成功后则以 manifest 中的 hash 启动新 session，并立即完整核对；因此最终 hash 计算与 SQLite 发布之间发生的文件变化也不会被新 monitor 基线掩盖。
 
@@ -360,6 +371,11 @@ mvn.cmd -q test
 - 切换知识库后旧 identity 的结果被拒绝。
 - 取消构建保留旧发布版本且不残留 `.tmp`。
 - 启动时把中断的 `BUILDING` 恢复为失败状态并清理 `.tmp`。
+- 只修改一个文件时，embedding 输入只包含该文件的新 chunks。
+- 删除文件后，新 snapshot 不包含其 entry 或任何 chunk。
+- 模型、reader 或 chunker 版本变化时，planner 自动把必要文件归入 modified。
+- 同一文件集合的增量构建与全量构建产生等价 entries、chunks 和 embeddings。
+- 增量 embedding 失败时，旧 published revision 和旧 revision 文件保持不变。
 
 另有纯应用层测试使用内存 repository、内存 index repository、fake embedder、fake chat model 和 fake secret store 运行完整重建与问答用例，不启动 Swing、SQLite、ONNX 或 HTTP 服务。
 该组测试还注入索引保存失败和数据库发布失败，验证两类故障都不会移动已发布 revision 或替换活动索引。
@@ -440,3 +456,21 @@ SettingsRepository
 - ADR 位于 [`docs/adr`](docs/adr)。
 - 工程问题、实现类和自动化证据位于 [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md)。
 - `ArchitectureTest` 固定三层依赖、Swing DTO 边界、用例隔离、检索策略依赖和 `SwingWorker` 所有权。
+
+## 16. 第三阶段增量索引结果
+
+### 16.1 文件级身份与纯规划策略
+
+`FileFingerprint` 对每个受支持文件计算最终 SHA-256 身份；`DocumentIndexEntry` 把该身份、reader/chunker 版本与已发布 chunk IDs 绑定。`IncrementalIndexPlanner` 不访问文件系统、数据库或 embedding adapter，只比较上一 entries 与当前 fingerprints，输出 `added/modified/deleted/reused`，可直接使用小对象图测试。
+
+### 16.2 完整 snapshot 的增量生成
+
+`IncrementalIndexBuilder` 按当前扫描顺序组装文件：reused 项从上一 snapshot 取回原 chunks 和 embeddings，added/modified 项才经过 reader、chunker 和批量 embedding，deleted 项自然从结果中消失。最终仍生成包含全部当前文件的 v4 snapshot，不原地修改活动索引。
+
+复用的全局前提是 embedding model signature 兼容；每个文件还必须同时匹配内容 hash、大小、mtime、reader version 和 chunking version。任一条件变化都会重新处理必要文件。旧 v1-v3 snapshot 没有文件级 entries，会保守执行一次全量重建。
+
+### 16.3 发布与失败语义
+
+watcher 确认外部文件变化时条件递增 `source_revision`；对已经 `READY` 的 revision 主动重建时，`beginIndexBuildRevision` 也会原子分配下一 revision。因此增量构建总能写入新的 `<revision>.bin`。保存、embedding、取消或数据库条件发布失败时，`published_index_revision` 仍指向旧文件，活动 `IndexHandle` 也不会切换。
+
+自动化证据位于 `IncrementalIndexTest` 与 `RuntimeFreshnessTest.failedIncrementalBuildKeepsPreviouslyPublishedRevisionFile`，覆盖单文件向量化、删除、版本回退、全量等价和失败保留旧 revision。

@@ -122,6 +122,31 @@ class RuntimeFreshnessTest {
         }
     }
 
+    @Test
+    void failedIncrementalBuildKeepsPreviouslyPublishedRevisionFile() throws Exception {
+        Path source = source("incremental-failure", "first published version with enough text");
+        Path database = temporaryDirectory.resolve("incremental-failure.db");
+        Path indexes = temporaryDirectory.resolve("incremental-failure-indexes");
+        AppRepository repository = new AppRepository(new DatabaseManager(database));
+        FailingEmbeddingProvider provider = new FailingEmbeddingProvider();
+        try (FileSystemSourceFreshnessMonitor monitor = monitor();
+             KnowledgeService service = new KnowledgeService(provider, repository, repository, new SecretCodec(),
+                     new OpenAiCompatibleClient(), new FileSystemIndexRepository(indexes), monitor)) {
+            publish(service, source);
+            String knowledgeBaseId = service.currentKnowledgeBase().id();
+            long publishedRevision = service.currentKnowledgeBase().publishedIndexRevision();
+
+            Files.writeString(source.resolve("note.txt"), "changed content that requires a new incremental vector");
+            await(() -> service.indexStatus() == IndexStatus.DIRTY, Duration.ofSeconds(5));
+            assertTrue(service.sourceRevision() > publishedRevision);
+            provider.failNext.set(true);
+
+            assertThrows(IOException.class, () -> service.rebuildCurrent(null));
+            assertEquals(publishedRevision, service.currentKnowledgeBase().publishedIndexRevision());
+            assertTrue(Files.isRegularFile(indexes.resolve(knowledgeBaseId).resolve(publishedRevision + ".bin")));
+        }
+    }
+
     private void publish(KnowledgeService service, Path source) throws Exception {
         service.restore();
         service.addSource(source);
@@ -209,6 +234,15 @@ class RuntimeFreshnessTest {
                     throw new IOException("interrupted", interrupted);
                 }
             }
+            return super.embed(texts);
+        }
+    }
+
+    private static final class FailingEmbeddingProvider extends TestEmbeddingProvider {
+        private final AtomicBoolean failNext = new AtomicBoolean();
+
+        @Override public List<float[]> embed(List<String> texts) throws IOException {
+            if (failNext.compareAndSet(true, false)) throw new IOException("injected incremental embedding failure");
             return super.embed(texts);
         }
     }

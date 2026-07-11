@@ -5,7 +5,7 @@
 
 ## 决策
 
-即使未来加入增量索引，builder 也只复用未变化内容来生成新的完整 snapshot，不能原地修改活动索引。
+增量索引 builder 只复用未变化内容来生成新的完整 snapshot，不能原地修改活动索引。该决策已由索引格式 v4 的文件级 entries、`IncrementalIndexPlanner` 和 `IncrementalIndexBuilder` 落地。
 
 ## 原因与结果
 

@@ -47,7 +47,7 @@ mvn.cmd -q package
 
 添加或移除数据源后，数据库会在同一事务中递增 `source_revision`，索引立即变为 `DIRTY`。界面随后可以重建索引；在重建完成前，系统不会把旧索引伪装成最新版本。
 
-应用运行期间会为当前知识库递归注册文件监听器，并用周期性完整 reconciliation 补偿 Windows watcher 溢出、休眠恢复和不可靠文件系统事件。源文件被创建、修改或删除后，无需重启应用，活动索引会及时变为 `DIRTY`。新建子目录也会自动继续注册监听。
+应用运行期间会为当前知识库递归注册文件监听器，并用周期性完整 reconciliation 补偿 Windows watcher 溢出、休眠恢复和不可靠文件系统事件。源文件被创建、修改或删除后，无需重启应用，`source_revision` 会条件递增，活动索引及时变为 `DIRTY`。新建子目录也会自动继续注册监听。
 
 底部状态栏显示变化原因和最近一次源文件核对时间。监听器不可用、根目录不可访问、事件溢出尚未核对完成或 freshness 状态未知时，系统采用保守策略，不允许远程 RAG。
 
@@ -59,7 +59,9 @@ mvn.cmd -q package
 knowledgeBaseId + sourceRevision + sourceSetHash + embeddingModelSignature
 ```
 
-扫描、分块和向量化在独立 builder 中完成，不直接修改当前已发布索引。构建完成后先写入：
+扫描、分块和向量化在独立 builder 中完成，不直接修改当前已发布索引。索引格式 v4 为每个文件保存相对路径、大小、修改时间、SHA-256、reader/chunker 版本和 chunk IDs。重建时会读取上一已发布 snapshot：未变化文件直接复用 chunks 和 embeddings，只读取、分块并向量化新增或修改文件；删除文件的 chunks 不会进入新 snapshot。模型、reader 或 chunker 版本不兼容时会自动扩大重建范围。
+
+增量构建仍生成完整的新 revision snapshot。如果当前 revision 已经发布（例如用户主动重建 `READY` 索引或模型版本变化），开始构建时会先分配新的 revision，避免覆盖数据库仍引用的文件。构建完成后先写入：
 
 ```text
 %USERPROFILE%\.simplerag\indexes\<知识库ID>\<revision>.bin.tmp
@@ -191,8 +193,11 @@ bootstrap.AppCompositionRoot
 检索构建与查询由以下对象组合，修改分块不会触碰评分，修改排名也不会触碰扫描或 embedding adapter：
 
 ```text
-DocumentScanner -> DocumentReaderRegistry -> ChunkerRegistry
-  -> LexicalFeatureExtractor -> Index builder
+DocumentScanner -> FileFingerprint -> IncrementalIndexPlanner
+  -> DocumentReaderRegistry -> ChunkerRegistry
+  -> IncrementalIndexBuilder -> 完整 snapshot
+
+LexicalFeatureExtractor -> Index state
 
 QueryAnalyzer -> LexicalScorer + SemanticScorer
   -> RankingPolicy -> SearchResultView
@@ -202,7 +207,7 @@ SemanticHighlightService
 
 SQLite output ports 已按知识库、数据源、发布、freshness 和设置拆分，但共享 `SqliteTransactionManager`，因此接口隔离不会拆散跨表事务。
 
-架构决策见 [docs/adr](docs/adr)，第二阶段需求与测试映射见 [需求追踪矩阵](docs/REQUIREMENTS_TRACEABILITY.md)。
+架构决策见 [docs/adr](docs/adr)，结构稳定化与增量索引的需求、实现和测试映射见 [需求追踪矩阵](docs/REQUIREMENTS_TRACEABILITY.md)。
 
 ## 构建与测试
 
@@ -217,6 +222,8 @@ SQLite output ports 已按知识库、数据源、发布、freshness 和设置�
 - JUnit 5 运行态生命周期、页面独立构造、事务、一致性、迁移、失败、取消、隐私和过期任务测试；
 - 递归 watcher、动态子目录、`OVERFLOW` 完整核对和周期 reconciliation 测试；
 - 同会话修改/删除文件、监控关闭时远程请求数为 0，以及构建期间文件变化的竞态测试；
+- 增量 planner 表驱动测试、单文件 embedding 复用、删除清理、模型/reader/chunker 版本回退和全量等价性测试；
+- 增量 embedding 失败后旧 published revision 与旧索引文件保留测试；
 - ArchUnit 三层依赖、Swing DTO 边界、检索流水线和后台任务所有权检查；
 - 原有 `SemanticSearchEngineTest` 真实 ONNX 跨语言检索入口；
 - 原有 `CourseFeaturesTest` SQLite、模拟 OpenAI JSON/SSE 和引用入口。

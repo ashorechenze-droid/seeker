@@ -12,6 +12,8 @@ import java.util.Locale;
 
 /** Registry boundary for document decoding; currently provides the existing plain-text reader. */
 public final class DocumentReaderRegistry {
+    public static final int READER_VERSION = 1;
+
     public ReadDocument read(Path file, Path root) throws IOException {
         String text;
         try {

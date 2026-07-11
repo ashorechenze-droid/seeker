@@ -142,10 +142,15 @@ class KnowledgeServiceUnitTest {
             if (sources.get(id).remove(path.toAbsolutePath().normalize())) dirty(id);
         }
         @Override public boolean beginIndexBuild(String id, long revision) {
+            return beginIndexBuildRevision(id, revision) != null;
+        }
+        @Override public Long beginIndexBuildRevision(String id, long revision) {
             KnowledgeBase old = knowledgeBases.get(id);
-            if (old.sourceRevision() != revision) return false;
-            replace(old, revision, old.publishedIndexRevision(), IndexStatus.BUILDING, "");
-            return true;
+            if (old.sourceRevision() != revision) return null;
+            long buildRevision = old.publishedIndexRevision() != null
+                    && old.publishedIndexRevision() == old.sourceRevision() ? revision + 1 : revision;
+            replace(old, buildRevision, old.publishedIndexRevision(), IndexStatus.BUILDING, "");
+            return buildRevision;
         }
         @Override public void markIndexBuildFailed(String id, long revision, String error) {
             KnowledgeBase old = knowledgeBases.get(id);
@@ -159,7 +164,7 @@ class KnowledgeServiceUnitTest {
             KnowledgeBase old = knowledgeBases.get(id);
             if (old.sourceRevision() != revision) return false;
             knowledgeBases.put(id, new KnowledgeBase(old.id(), old.name(), old.description(), old.createdAt(),
-                    old.updatedAt(), old.sourceRevision(), old.publishedIndexRevision(), IndexStatus.DIRTY,
+                    old.updatedAt(), old.sourceRevision() + 1, old.publishedIndexRevision(), IndexStatus.DIRTY,
                     reason, observedHash == null ? old.lastVerifiedSourceHash() : observedHash,
                     verifiedAt == null ? old.lastVerifiedAt() : verifiedAt, reason));
             return true;

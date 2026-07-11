@@ -180,16 +180,21 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         syncSources(roots);
         KnowledgeBase target = knowledgeBases.findKnowledgeBase(runtime.current().knowledgeBaseId()).orElseThrow();
         List<Path> capturedSources = sources.listSources(target.id());
-        IndexBuildRequest request = new IndexBuildRequest(target.id(), target.sourceRevision(), capturedSources,
-                IndexIdentity.sourceSetHash(capturedSources), embeddingProvider.signature());
-        startFreshnessMonitoring(target, capturedSources, request.sourceSetHash());
-        if (!publications.beginIndexBuild(request.knowledgeBaseId(), request.sourceRevision())) {
+        String capturedSourceHash = IndexIdentity.sourceSetHash(capturedSources);
+        IndexSnapshot previousSnapshot = target.publishedIndexRevision() == null ? null
+                : indexRepository.loadRevision(target.id(), target.publishedIndexRevision()).orElse(null);
+        Long buildRevision = publications.beginIndexBuildRevision(target.id(), target.sourceRevision());
+        if (buildRevision == null) {
             throw new StaleTaskException("数据源已变化，请重新开始索引构建");
         }
+        KnowledgeBase buildingTarget = knowledgeBases.findKnowledgeBase(target.id()).orElseThrow();
+        IndexBuildRequest request = new IndexBuildRequest(target.id(), buildRevision, capturedSources,
+                capturedSourceHash, embeddingProvider.signature());
+        startFreshnessMonitoring(buildingTarget, capturedSources, request.sourceSetHash());
         refreshActiveKnowledgeBase();
         SemanticSearchEngine builder = new SemanticSearchEngine(embeddingProvider);
         try {
-            SemanticSearchEngine.IndexReport report = builder.index(request.sources(), progress);
+            SemanticSearchEngine.IndexReport report = builder.index(request.sources(), previousSnapshot, progress);
             IndexSnapshot raw = builder.snapshot();
             int dimension = raw.chunks().stream().filter(DocumentChunk::hasEmbedding)
                     .mapToInt(chunk -> chunk.embedding().length).findFirst().orElse(0);
@@ -430,9 +435,13 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
             return;
         }
         String currentSourceHash = IndexIdentity.sourceSetHash(sources.listSources(knowledgeBase.id()));
-        if (manifest.sourceRevision() != knowledgeBase.sourceRevision()
-                || !manifest.sourceSetHash().equals(currentSourceHash)) {
+        if (manifest.sourceRevision() != knowledgeBase.sourceRevision()) {
             publications.markIndexDirty(knowledgeBase.id(), "索引对应的数据源版本已过期");
+            return;
+        }
+        if (!manifest.sourceSetHash().equals(currentSourceHash)) {
+            freshnessRecords.markIndexDirtyIfCurrent(knowledgeBase.id(), knowledgeBase.sourceRevision(),
+                    "源文件已变化，需要重建索引", currentSourceHash, System.currentTimeMillis());
             return;
         }
         if (manifest.indexFormatVersion() != IndexSnapshot.CURRENT_VERSION

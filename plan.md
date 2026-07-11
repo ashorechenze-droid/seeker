@@ -290,7 +290,7 @@ SettingsRepository
 - ArchUnit 明确检查新的依赖边界。
 - 现有 25 个 JUnit/ArchUnit 测试、真实 ONNX 回归和模拟 OpenAI 回归保持通过。
 
-## 6. 第三阶段：增量索引，而不是更频繁地全量重建
+## 6. 第三阶段：增量索引，而不是更频繁地全量重建（已完成）
 
 ### 为什么排在 freshness 和结构稳定化之后
 
@@ -347,6 +347,16 @@ IncrementalIndexBuilder
 - reader/chunking/model 版本变化时自动退化为必要范围的全量重建。
 - 增量构建失败仍保留上一 revision。
 - 与全量重建结果进行等价性测试。
+
+### 实施结果与证据
+
+- `IndexSnapshot` 升级为格式 v4，通过 `DocumentIndexEntry` 记录 root、relativePath、size、modifiedAt、SHA-256、reader/chunker 版本和 chunk IDs。
+- `IncrementalIndexPlanner` 是无文件系统、数据库和 embedding 依赖的纯策略，输出 `added/modified/deleted/reused`。
+- `IncrementalIndexBuilder` 从上一已发布 snapshot 复用未变化 chunks/embeddings，只处理新增和修改文件，并始终生成完整的新 revision snapshot。
+- embedding model signature、reader version 或 chunking version 不兼容时，复用门禁自动关闭或把对应文件归入 modified。
+- watcher 确认外部内容变化时条件递增 `source_revision`；对已发布 revision 主动重建时也会先原子分配下一 revision，增量构建失败不会覆盖或删除旧 published revision 文件。
+- `IncrementalIndexTest` 覆盖单文件 embedding、删除清理、版本回退和全量等价；`RuntimeFreshnessTest` 覆盖增量 embedding 失败时保留旧 revision 文件。
+- 完整 `build-and-test.cmd` 验证包含 47 项 JUnit/ArchUnit、真实 ONNX 跨语言检索和模拟 OpenAI JSON/SSE 回归。
 
 ## 7. 第四阶段：先建立检索质量基线，再调算法
 
@@ -543,7 +553,7 @@ UI 增加“诊断信息”入口，展示当前 revision、发布 revision、�
 
 ## 12. 已完成的结构稳定化迭代
 
-本次迭代只完成第二阶段的结构稳定化，没有同时加入 PDF、增量索引、BM25 或 HNSW：
+该迭代完成第二阶段的结构稳定化，当时没有同时加入 PDF、增量索引、BM25 或 HNSW：
 
 1. 已为搜索、构建、问答、freshness、运行态、页面和失败路径补充 characterization/golden tests。
 2. 已定义 `ActiveKnowledgeContext`、`ActiveKnowledgeRuntime` 和 `IndexLifecycle`，集中运行态转换。
@@ -556,7 +566,7 @@ UI 增加“诊断信息”入口，展示当前 revision、发布 revision、�
 9. 已增加 ArchUnit 细粒度依赖规则；filesystem monitor、index repository、SQLite transaction、OpenAI JSON/SSE 和 reader/scanner 行为由 adapter/回归测试覆盖。
 10. 已更新 README、DEVELOPMENT、6 个 ADR、架构/状态/时序说明和需求追踪矩阵。
 
-完成证据：`MainFrame` 从 1291 行降至 115 行，`SemanticSearchEngine` 从 664 行降至 301 行；`MainFrame` 只保留窗口组合、导航和关闭，页面工作流由 `DesktopWorkspaceController` 协调；活动运行态只有 `ActiveKnowledgeRuntime` 写入，Swing 不读取检索内部对象，40 项 JUnit/ArchUnit、真实 ONNX 和模拟 OpenAI JSON/SSE 完整回归全部通过。
+完成证据：`MainFrame` 从 1291 行降至 115 行，`SemanticSearchEngine` 从 664 行降至 301 行；`MainFrame` 只保留窗口组合、导航和关闭，页面工作流由 `DesktopWorkspaceController` 协调；活动运行态只有 `ActiveKnowledgeRuntime` 写入，Swing 不读取检索内部对象；该阶段当时的 40 项 JUnit/ArchUnit、真实 ONNX 和模拟 OpenAI JSON/SSE 完整回归全部通过。
 
 ## 13. 暂不优先
 
