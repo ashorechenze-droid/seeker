@@ -161,15 +161,22 @@ SQLite 使用版本化 migration。`knowledge_base` 保存 `source_revision`、`
 
 ```text
 adapter.in.swing
-  MainFrame
+  MainFrame（窗口组合、导航、关闭）
+  DesktopWorkspaceController（页面工作流）
+  KnowledgePanel / SearchPanel / AskPanel / StatusBar
+  BackgroundTaskCoordinator / DesktopFileGateway
   KnowledgeController / SearchController / AskController
                 |
                 v
-application.port.in -> application.usecase.KnowledgeService
+application.port.in -> 独立 use cases + application DTO
+                |
+                v
+ActiveKnowledgeRuntime + IndexLifecycle
                 |
                 v
 application.port.out
-  KnowledgeBaseRepository / IndexRepository / TextEmbedder
+  KnowledgeBaseRepository / KnowledgeSourceRepository
+  IndexPublicationRepository / FreshnessRepository / IndexRepository
   ChatModel / SecretStore / SettingsRepository
                 ^
                 |
@@ -179,9 +186,23 @@ bootstrap.AppCompositionRoot
   唯一主要的具体依赖组装位置
 ```
 
-所有搜索、问答和后台 UI 结果都绑定 `knowledgeBaseId + sourceRevision`。用户切换知识库或 revision 变化后，旧任务结果会被丢弃，不会写入新页面。
+`ActiveKnowledgeRuntime` 原子持有当前知识库、source revision、状态、freshness 和 `IndexHandle`，所有转换通过 `IndexLifecycle`。搜索、问答和后台 UI 结果都绑定 `knowledgeBaseId + sourceRevision`；切换知识库或 revision 变化后，`BackgroundTaskCoordinator` 会丢弃旧任务结果。
 
-检索层把索引身份、向量兼容判断和排名策略拆分为 `IndexManifest`、`IndexIdentity`、`SemanticScorer` 和 `RankingPolicy`。具体 SQLite、文件系统、ONNX 与 HTTP 实现不会被应用层直接创建。
+检索构建与查询由以下对象组合，修改分块不会触碰评分，修改排名也不会触碰扫描或 embedding adapter：
+
+```text
+DocumentScanner -> DocumentReaderRegistry -> ChunkerRegistry
+  -> LexicalFeatureExtractor -> Index builder
+
+QueryAnalyzer -> LexicalScorer + SemanticScorer
+  -> RankingPolicy -> SearchResultView
+
+SemanticHighlightService
+```
+
+SQLite output ports 已按知识库、数据源、发布、freshness 和设置拆分，但共享 `SqliteTransactionManager`，因此接口隔离不会拆散跨表事务。
+
+架构决策见 [docs/adr](docs/adr)，第二阶段需求与测试映射见 [需求追踪矩阵](docs/REQUIREMENTS_TRACEABILITY.md)。
 
 ## 构建与测试
 
@@ -193,10 +214,10 @@ bootstrap.AppCompositionRoot
 
 脚本依次运行：
 
-- JUnit 5 一致性、迁移、失败、取消、隐私和过期任务测试；
+- JUnit 5 运行态生命周期、页面独立构造、事务、一致性、迁移、失败、取消、隐私和过期任务测试；
 - 递归 watcher、动态子目录、`OVERFLOW` 完整核对和周期 reconciliation 测试；
 - 同会话修改/删除文件、监控关闭时远程请求数为 0，以及构建期间文件变化的竞态测试；
-- ArchUnit 依赖方向检查；
+- ArchUnit 三层依赖、Swing DTO 边界、检索流水线和后台任务所有权检查；
 - 原有 `SemanticSearchEngineTest` 真实 ONNX 跨语言检索入口；
 - 原有 `CourseFeaturesTest` SQLite、模拟 OpenAI JSON/SSE 和引用入口。
 

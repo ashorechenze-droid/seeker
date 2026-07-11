@@ -10,6 +10,9 @@ import com.simplerag.application.port.in.SearchKnowledge;
 import com.simplerag.application.port.out.ChatModel;
 import com.simplerag.application.port.out.IndexRepository;
 import com.simplerag.application.port.out.KnowledgeBaseRepository;
+import com.simplerag.application.port.out.KnowledgeSourceRepository;
+import com.simplerag.application.port.out.IndexPublicationRepository;
+import com.simplerag.application.port.out.FreshnessRepository;
 import com.simplerag.application.port.out.SecretStore;
 import com.simplerag.application.port.out.SettingsRepository;
 import com.simplerag.application.port.out.SourceFreshnessMonitor;
@@ -18,6 +21,15 @@ import com.simplerag.application.freshness.FreshnessGate;
 import com.simplerag.application.freshness.FreshnessSnapshot;
 import com.simplerag.application.freshness.FreshnessState;
 import com.simplerag.application.freshness.SourceFingerprint;
+import com.simplerag.application.runtime.ActiveKnowledgeContext;
+import com.simplerag.application.runtime.ActiveKnowledgeRuntime;
+import com.simplerag.application.runtime.IndexLifecycle;
+import com.simplerag.application.dto.AskResultView;
+import com.simplerag.application.dto.CitationView;
+import com.simplerag.application.dto.DocumentReference;
+import com.simplerag.application.dto.IndexBuildProgress;
+import com.simplerag.application.dto.IndexBuildResult;
+import com.simplerag.application.dto.SearchResultView;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.KnowledgeStats;
@@ -48,103 +60,117 @@ import java.util.function.Consumer;
 public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowledgeSources,
         RebuildKnowledgeIndex, SearchKnowledge, AskKnowledge, ManageApiSettings, DesktopReadModel, AutoCloseable {
     private static final String ACTIVE_KB = "active_knowledge_base";
-    private static final String API_URL = "api.base_url";
-    private static final String API_KEY = "api.encrypted_key";
-    private static final String API_MODEL = "api.model";
 
     private final TextEmbedder embeddingProvider;
-    private final KnowledgeBaseRepository repository;
+    private final KnowledgeBaseRepository knowledgeBases;
+    private final KnowledgeSourceRepository sources;
+    private final IndexPublicationRepository publications;
+    private final FreshnessRepository freshnessRecords;
     private final SettingsRepository settings;
-    private final SecretStore secretCodec;
+    private final ApiSettingsUseCase apiSettings;
     private final ChatModel apiClient;
     private final IndexRepository indexRepository;
     private final SourceFreshnessMonitor freshnessMonitor;
     private final FreshnessGate freshnessGate;
     private final java.util.concurrent.atomic.AtomicLong freshnessEpoch = new java.util.concurrent.atomic.AtomicLong();
-    private SemanticSearchEngine engine;
-    private KnowledgeBase activeKnowledgeBase;
-    private volatile IndexHandle activeHandle;
+    private final ActiveKnowledgeRuntime runtime;
 
     public KnowledgeService(TextEmbedder embeddingProvider, KnowledgeBaseRepository repository,
                             SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
                             IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor) {
+        this(embeddingProvider, repository, settings, secretCodec, apiClient, indexRepository,
+                freshnessMonitor, new ActiveKnowledgeRuntime(new IndexLifecycle()));
+    }
+
+    public KnowledgeService(TextEmbedder embeddingProvider, KnowledgeBaseRepository repository,
+                            SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
+                            IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor,
+                            ActiveKnowledgeRuntime runtime) {
         this.embeddingProvider = embeddingProvider;
-        this.repository = repository;
+        this.knowledgeBases = repository;
+        this.sources = repository;
+        this.publications = repository;
+        this.freshnessRecords = repository;
         this.settings = settings;
-        this.secretCodec = secretCodec;
         this.apiClient = apiClient;
+        this.apiSettings = new ApiSettingsUseCase(settings, secretCodec, apiClient);
         this.indexRepository = indexRepository;
         this.freshnessMonitor = freshnessMonitor;
         this.freshnessGate = new FreshnessGate(freshnessMonitor);
-        this.engine = new SemanticSearchEngine(embeddingProvider);
+        this.runtime = runtime;
     }
 
     public synchronized boolean restore() {
-        List<KnowledgeBase> knowledgeBases = repository.listKnowledgeBases();
-        if (knowledgeBases.isEmpty()) {
-            KnowledgeBase created = repository.createKnowledgeBase("我的知识库", "从本地目录建立的个人知识库");
+        List<KnowledgeBase> available = knowledgeBases.listKnowledgeBases();
+        if (available.isEmpty()) {
+            KnowledgeBase created = knowledgeBases.createKnowledgeBase("我的知识库", "从本地目录建立的个人知识库");
             if (indexRepository.usesDefaultLocation()) migrateLegacyIndex(created);
-            knowledgeBases = List.of(created);
+            available = List.of(created);
         }
-        String preferred = settings.getSetting(ACTIVE_KB).orElse(knowledgeBases.get(0).id());
-        KnowledgeBase selected = repository.findKnowledgeBase(preferred).orElse(knowledgeBases.get(0));
+        String preferred = settings.getSetting(ACTIVE_KB).orElse(available.get(0).id());
+        KnowledgeBase selected = knowledgeBases.findKnowledgeBase(preferred).orElse(available.get(0));
         return loadKnowledgeBase(selected);
     }
 
     public List<KnowledgeBase> knowledgeBases() {
-        return repository.listKnowledgeBases();
+        return knowledgeBases.listKnowledgeBases();
     }
 
     public KnowledgeBase currentKnowledgeBase() {
-        return activeKnowledgeBase;
+        return runtime.current().knowledgeBase();
     }
 
     public synchronized KnowledgeBase createKnowledgeBase(String name, String description) {
-        KnowledgeBase created = repository.createKnowledgeBase(name, description);
+        KnowledgeBase created = knowledgeBases.createKnowledgeBase(name, description);
         loadKnowledgeBase(created);
         return created;
     }
 
     public synchronized KnowledgeBase updateCurrentKnowledgeBase(String name, String description) {
         requireActive();
-        activeKnowledgeBase = repository.updateKnowledgeBase(activeKnowledgeBase.id(), name, description);
-        return activeKnowledgeBase;
+        ActiveKnowledgeContext current = runtime.current();
+        KnowledgeBase updated = knowledgeBases.updateKnowledgeBase(current.knowledgeBaseId(), name, description);
+        runtime.refresh(context(updated, current.indexHandle().engine()));
+        return updated;
     }
 
     public synchronized void deleteKnowledgeBase(String id) throws IOException {
-        if (repository.listKnowledgeBases().size() <= 1) {
+        if (knowledgeBases.listKnowledgeBases().size() <= 1) {
             throw new IllegalStateException("至少需要保留一个知识库");
         }
-        repository.deleteKnowledgeBase(id);
+        knowledgeBases.deleteKnowledgeBase(id);
         indexRepository.deleteIndex(id);
-        if (activeKnowledgeBase != null && activeKnowledgeBase.id().equals(id)) {
-            loadKnowledgeBase(repository.listKnowledgeBases().get(0));
+        ActiveKnowledgeContext current = runtime.currentOrNull();
+        if (current != null && current.knowledgeBaseId().equals(id)) {
+            loadKnowledgeBase(knowledgeBases.listKnowledgeBases().get(0));
         }
     }
 
     public synchronized boolean selectKnowledgeBase(String id) {
-        KnowledgeBase selected = repository.findKnowledgeBase(id)
+        KnowledgeBase selected = knowledgeBases.findKnowledgeBase(id)
                 .orElseThrow(() -> new IllegalArgumentException("知识库不存在"));
         return loadKnowledgeBase(selected);
     }
 
     public void addSource(Path path) {
         requireActive();
-        repository.addSource(activeKnowledgeBase.id(), path);
+        sources.addSource(runtime.current().knowledgeBaseId(), path);
         refreshAfterSourceChange();
         startFreshnessMonitoring();
     }
 
     public void removeSource(Path path) {
         requireActive();
-        repository.removeSource(activeKnowledgeBase.id(), path);
+        sources.removeSource(runtime.current().knowledgeBaseId(), path);
         refreshAfterSourceChange();
         startFreshnessMonitoring();
     }
 
-    public SemanticSearchEngine.IndexReport rebuildCurrent(
-            Consumer<SemanticSearchEngine.IndexProgress> progress) throws IOException {
-        return rebuild(roots(), progress);
+    public IndexBuildResult rebuildCurrent(Consumer<IndexBuildProgress> progress) throws IOException {
+        SemanticSearchEngine.IndexReport report = rebuild(roots(), progress == null ? null : value ->
+                progress.accept(new IndexBuildProgress(value.processed(), value.total(),
+                        value.currentFile(), value.stage())));
+        return new IndexBuildResult(report.files(), report.chunks(), report.skipped());
     }
 
     public SemanticSearchEngine.IndexReport rebuild(List<Path> roots,
@@ -152,12 +178,12 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
             throws IOException {
         requireActive();
         syncSources(roots);
-        KnowledgeBase target = repository.findKnowledgeBase(activeKnowledgeBase.id()).orElseThrow();
-        List<Path> capturedSources = repository.listSources(target.id());
+        KnowledgeBase target = knowledgeBases.findKnowledgeBase(runtime.current().knowledgeBaseId()).orElseThrow();
+        List<Path> capturedSources = sources.listSources(target.id());
         IndexBuildRequest request = new IndexBuildRequest(target.id(), target.sourceRevision(), capturedSources,
                 IndexIdentity.sourceSetHash(capturedSources), embeddingProvider.signature());
         startFreshnessMonitoring(target, capturedSources, request.sourceSetHash());
-        if (!repository.beginIndexBuild(request.knowledgeBaseId(), request.sourceRevision())) {
+        if (!publications.beginIndexBuild(request.knowledgeBaseId(), request.sourceRevision())) {
             throw new StaleTaskException("数据源已变化，请重新开始索引构建");
         }
         refreshActiveKnowledgeBase();
@@ -174,30 +200,29 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                     IndexSnapshot.CURRENT_VERSION, builtAt);
             IndexSnapshot snapshot = builder.snapshot(manifest);
             String currentSourceHash = IndexIdentity.sourceSetHash(
-                    repository.listSources(request.knowledgeBaseId()));
+                    sources.listSources(request.knowledgeBaseId()));
             if (!request.sourceSetHash().equals(currentSourceHash)) {
                 throw new StaleTaskException("构建期间源文件已变化，结果已丢弃");
             }
             String fileName = indexRepository.saveRevision(request.knowledgeBaseId(), snapshot);
-            if (!repository.publishIndex(manifest, fileName)) {
+            if (!publications.publishIndex(manifest, fileName)) {
                 indexRepository.deleteRevision(request.knowledgeBaseId(), request.sourceRevision());
                 throw new StaleTaskException("构建期间数据源已变化，旧结果已丢弃");
             }
             synchronized (this) {
-                if (activeKnowledgeBase != null && activeKnowledgeBase.id().equals(request.knowledgeBaseId())) {
-                    engine = builder;
-                    activeKnowledgeBase = repository.findKnowledgeBase(request.knowledgeBaseId()).orElseThrow();
-                    activeHandle = new IndexHandle(request.knowledgeBaseId(), request.sourceRevision(),
-                            IndexStatus.READY, builder);
+                ActiveKnowledgeContext current = runtime.currentOrNull();
+                if (current != null && current.knowledgeBaseId().equals(request.knowledgeBaseId())) {
+                    KnowledgeBase published = knowledgeBases.findKnowledgeBase(request.knowledgeBaseId()).orElseThrow();
+                    runtime.publish(context(published, builder));
                 }
             }
             startFreshnessMonitoringAfterPublish(manifest);
             return report;
         } catch (IOException | RuntimeException failure) {
             if (failure instanceof StaleTaskException || failure instanceof InterruptedIOException) {
-                repository.markIndexDirty(request.knowledgeBaseId(), failure.getMessage());
+                publications.markIndexDirty(request.knowledgeBaseId(), failure.getMessage());
             } else {
-                repository.markIndexBuildFailed(request.knowledgeBaseId(), request.sourceRevision(), failure.getMessage());
+                publications.markIndexBuildFailed(request.knowledgeBaseId(), request.sourceRevision(), failure.getMessage());
             }
             refreshActiveKnowledgeBaseIf(request.knowledgeBaseId());
             throw failure;
@@ -206,27 +231,30 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
 
     public List<SearchResult> search(String query, int limit, String extension) {
         IndexHandle handle = requireHandle();
-        return search(handle.knowledgeBaseId(), handle.sourceRevision(), query, limit, extension);
+        return handle.engine().search(query, limit, extension);
     }
 
-    public List<SearchResult> search(String knowledgeBaseId, long expectedRevision, String query,
-                                     int limit, String extension) {
+    public List<SearchResultView> search(String knowledgeBaseId, long expectedRevision, String query,
+                                         int limit, String extension) {
         IndexHandle handle = requireHandle();
         requireIdentity(handle, knowledgeBaseId, expectedRevision);
-        return handle.engine().search(query, limit, extension);
+        return handle.engine().search(query, limit, extension).stream().map(KnowledgeService::toView).toList();
     }
 
     public List<SemanticHighlight> semanticHighlights(String query, DocumentChunk chunk, int limit)
             throws IOException {
         IndexHandle handle = requireHandle();
-        return semanticHighlights(handle.knowledgeBaseId(), handle.sourceRevision(), query, chunk, limit);
+        return handle.engine().semanticHighlights(query, chunk, limit);
     }
 
     public List<SemanticHighlight> semanticHighlights(String knowledgeBaseId, long expectedRevision,
-                                                       String query, DocumentChunk chunk, int limit)
+                                                       String query, DocumentReference document, int limit)
             throws IOException {
         IndexHandle handle = requireHandle();
         requireIdentity(handle, knowledgeBaseId, expectedRevision);
+        DocumentChunk chunk = handle.engine().snapshot().chunks().stream()
+                .filter(candidate -> candidate.id().equals(document.id()))
+                .findFirst().orElseThrow(() -> new StaleTaskException("检索片段已失效，请重新搜索"));
         return handle.engine().semanticHighlights(query, chunk, limit);
     }
 
@@ -245,47 +273,46 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     public RagAnswer askStream(String question, ApiConfig config, Consumer<List<RagCitation>> onCitations,
                                Consumer<String> onDelta) throws IOException, InterruptedException {
         IndexHandle handle = requireReadyHandle();
-        return askStream(handle.knowledgeBaseId(), handle.sourceRevision(), question, config, onCitations, onDelta);
-    }
-
-    public RagAnswer askStream(String knowledgeBaseId, long expectedRevision, String question, ApiConfig config,
-                               Consumer<List<RagCitation>> onCitations, Consumer<String> onDelta)
-            throws IOException, InterruptedException {
-        IndexHandle handle = requireReadyHandle(knowledgeBaseId, expectedRevision);
         List<RagCitation> citations = retrieveCitations(handle, question);
         if (onCitations != null) onCitations.accept(citations);
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
         return apiClient.answerStream(config, question, citations, onDelta);
     }
 
+    public AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question, ApiConfig config,
+                               Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
+            throws IOException, InterruptedException {
+        IndexHandle handle = requireReadyHandle(knowledgeBaseId, expectedRevision);
+        List<RagCitation> citations = retrieveCitations(handle, question);
+        List<CitationView> citationViews = citations.stream().map(KnowledgeService::toView).toList();
+        if (onCitations != null) onCitations.accept(citationViews);
+        freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
+        RagAnswer answer = apiClient.answerStream(config, question, citations, onDelta);
+        return new AskResultView(answer.text(), citationViews, answer.model());
+    }
+
     private List<RagCitation> retrieveCitations(IndexHandle handle, String question) {
-        List<SearchResult> results = search(handle.knowledgeBaseId(), handle.sourceRevision(), question, 8, "全部");
+        List<SearchResult> results = handle.engine().search(question, 8, "全部");
         return java.util.stream.IntStream.range(0, Math.min(6, results.size()))
                 .mapToObj(index -> new RagCitation(index + 1, results.get(index).chunk(), results.get(index).score()))
                 .toList();
     }
 
     public List<String> fetchModels(ApiConfig config) throws IOException, InterruptedException {
-        return apiClient.listModels(config);
+        return apiSettings.fetchModels(config);
     }
 
     public ApiConfig apiConfig() {
-        String url = settings.getSetting(API_URL).orElse("http://localhost:11434/v1");
-        String key = secretCodec.decrypt(settings.getSetting(API_KEY).orElse(""));
-        String model = settings.getSetting(API_MODEL).orElse("");
-        return new ApiConfig(url, key, model);
+        return apiSettings.apiConfig();
     }
 
     public void saveApiConfig(ApiConfig config) {
-        config.validateForModels();
-        settings.putSetting(API_URL, config.normalizedBaseUrl());
-        settings.putSetting(API_KEY, secretCodec.encrypt(config.apiKey()));
-        settings.putSetting(API_MODEL, config.model());
+        apiSettings.saveApiConfig(config);
     }
 
     public List<Path> roots() {
         requireActive();
-        return repository.listSources(activeKnowledgeBase.id());
+        return sources.listSources(runtime.current().knowledgeBaseId());
     }
 
     public Set<String> extensions() {
@@ -304,7 +331,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     }
 
     public boolean semanticModelConfigured() {
-        return engine.semanticModelConfigured();
+        return runtime.current().indexHandle().engine().semanticModelConfigured();
     }
 
     public String semanticStatus() {
@@ -315,7 +342,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
 
     public String freshnessStatus() {
         FreshnessSnapshot freshness = freshnessMonitor.snapshot();
-        KnowledgeBase knowledgeBase = activeKnowledgeBase;
+        KnowledgeBase knowledgeBase = runtime.currentOrNull() == null ? null : runtime.current().knowledgeBase();
         if (knowledgeBase != null && knowledgeBase.freshnessReason() != null
                 && !knowledgeBase.freshnessReason().isBlank()) {
             return knowledgeBase.freshnessReason() + verifiedAtSuffix(knowledgeBase.lastVerifiedAt());
@@ -345,17 +372,16 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     }
 
     public Path databasePath() {
-        return repository.databasePath();
+        return knowledgeBases.databasePath();
     }
 
     private boolean loadKnowledgeBase(KnowledgeBase selected) {
         if (selected.indexStatus() == IndexStatus.BUILDING) {
-            repository.markIndexBuildFailed(selected.id(), selected.sourceRevision(), "应用退出导致上次构建中断");
-            selected = repository.findKnowledgeBase(selected.id()).orElseThrow();
+            publications.markIndexBuildFailed(selected.id(), selected.sourceRevision(), "应用退出导致上次构建中断");
+            selected = knowledgeBases.findKnowledgeBase(selected.id()).orElseThrow();
         }
-        activeKnowledgeBase = selected;
         settings.putSetting(ACTIVE_KB, selected.id());
-        engine = new SemanticSearchEngine(embeddingProvider);
+        SemanticSearchEngine engine = new SemanticSearchEngine(embeddingProvider);
         try {
             indexRepository.cleanTemporaryFiles(selected.id());
             indexRepository.cleanUnreferenced(selected.id(), selected.publishedIndexRevision());
@@ -367,26 +393,25 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         }
         if (snapshot.isEmpty()) {
             snapshot = indexRepository.loadLegacy(selected.id());
-            if (snapshot.isPresent()) repository.markIndexIncompatible(selected.id(), "旧索引缺少完整 manifest，请重建");
+            if (snapshot.isPresent()) publications.markIndexIncompatible(selected.id(), "旧索引缺少完整 manifest，请重建");
         }
         if (snapshot.isPresent()) {
             engine.restore(snapshot.get());
             validateLoadedIndex(selected, snapshot.get());
         } else if (selected.publishedIndexRevision() != null) {
-            repository.markIndexIncompatible(selected.id(), "已发布索引文件不存在或损坏，请重建");
+            publications.markIndexIncompatible(selected.id(), "已发布索引文件不存在或损坏，请重建");
         }
-        activeKnowledgeBase = repository.findKnowledgeBase(selected.id()).orElseThrow();
+        KnowledgeBase activeKnowledgeBase = knowledgeBases.findKnowledgeBase(selected.id()).orElseThrow();
         if (activeKnowledgeBase.indexStatus() != IndexStatus.READY) engine.markStale();
-        activeHandle = new IndexHandle(selected.id(), activeKnowledgeBase.sourceRevision(),
-                activeKnowledgeBase.indexStatus(), engine);
+        runtime.restore(context(activeKnowledgeBase, engine));
         startFreshnessMonitoring();
         return snapshot.isPresent();
     }
 
     private void migrateLegacyIndex(KnowledgeBase target) {
         indexRepository.loadGlobalLegacy().ifPresent(snapshot -> {
-            snapshot.roots().stream().map(Path::of).forEach(path -> repository.addSource(target.id(), path));
-            repository.markIndexIncompatible(target.id(), "旧索引需要按新格式重建");
+            snapshot.roots().stream().map(Path::of).forEach(path -> sources.addSource(target.id(), path));
+            publications.markIndexIncompatible(target.id(), "旧索引需要按新格式重建");
         });
     }
 
@@ -401,47 +426,50 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     private void validateLoadedIndex(KnowledgeBase knowledgeBase, IndexSnapshot snapshot) {
         IndexManifest manifest = snapshot.manifest();
         if (manifest == null || !knowledgeBase.id().equals(manifest.knowledgeBaseId())) {
-            repository.markIndexIncompatible(knowledgeBase.id(), "索引缺少有效身份信息，请重建");
+            publications.markIndexIncompatible(knowledgeBase.id(), "索引缺少有效身份信息，请重建");
             return;
         }
-        String currentSourceHash = IndexIdentity.sourceSetHash(repository.listSources(knowledgeBase.id()));
+        String currentSourceHash = IndexIdentity.sourceSetHash(sources.listSources(knowledgeBase.id()));
         if (manifest.sourceRevision() != knowledgeBase.sourceRevision()
                 || !manifest.sourceSetHash().equals(currentSourceHash)) {
-            repository.markIndexDirty(knowledgeBase.id(), "索引对应的数据源版本已过期");
+            publications.markIndexDirty(knowledgeBase.id(), "索引对应的数据源版本已过期");
             return;
         }
         if (manifest.indexFormatVersion() != IndexSnapshot.CURRENT_VERSION
                 || manifest.chunkingVersion() != IndexIdentity.CHUNKING_VERSION
                 || (manifest.embeddingDimension() > 0
                 && !manifest.embeddingModelSignature().equals(embeddingProvider.signature().value()))) {
-            repository.markIndexIncompatible(knowledgeBase.id(), "索引与当前模型或格式不兼容，请重建");
+            publications.markIndexIncompatible(knowledgeBase.id(), "索引与当前模型或格式不兼容，请重建");
         }
     }
 
     private void refreshAfterSourceChange() {
-        refreshActiveKnowledgeBase();
-        engine.markStale();
-        activeHandle = new IndexHandle(activeKnowledgeBase.id(), activeKnowledgeBase.sourceRevision(),
-                activeKnowledgeBase.indexStatus(), engine);
+        ActiveKnowledgeContext current = runtime.current();
+        KnowledgeBase refreshed = knowledgeBases.findKnowledgeBase(current.knowledgeBaseId()).orElseThrow();
+        current.indexHandle().engine().markStale();
+        runtime.invalidate(context(refreshed, current.indexHandle().engine()));
     }
 
     private synchronized void refreshActiveKnowledgeBase() {
         requireActive();
-        activeKnowledgeBase = repository.findKnowledgeBase(activeKnowledgeBase.id()).orElseThrow();
-        if (activeHandle != null) {
-            activeHandle = new IndexHandle(activeKnowledgeBase.id(), activeKnowledgeBase.sourceRevision(),
-                    activeKnowledgeBase.indexStatus(), activeHandle.engine());
-        }
+        ActiveKnowledgeContext current = runtime.current();
+        KnowledgeBase refreshed = knowledgeBases.findKnowledgeBase(current.knowledgeBaseId()).orElseThrow();
+        ActiveKnowledgeContext next = context(refreshed, current.indexHandle().engine());
+        if (refreshed.indexStatus() == IndexStatus.BUILDING) runtime.beginBuild(next);
+        else if (refreshed.indexStatus() == IndexStatus.DIRTY || refreshed.indexStatus() == IndexStatus.INCOMPATIBLE) {
+            current.indexHandle().engine().markStale();
+            runtime.invalidate(next);
+        } else if (refreshed.indexStatus() == IndexStatus.FAILED) runtime.fail(next);
+        else runtime.refresh(next);
     }
 
     private synchronized void refreshActiveKnowledgeBaseIf(String knowledgeBaseId) {
-        if (activeKnowledgeBase != null && activeKnowledgeBase.id().equals(knowledgeBaseId)) refreshActiveKnowledgeBase();
+        ActiveKnowledgeContext current = runtime.currentOrNull();
+        if (current != null && current.knowledgeBaseId().equals(knowledgeBaseId)) refreshActiveKnowledgeBase();
     }
 
     private IndexHandle requireHandle() {
-        IndexHandle handle = activeHandle;
-        if (handle == null) throw new IllegalStateException("尚未选择知识库");
-        return handle;
+        return runtime.current().indexHandle();
     }
 
     private IndexHandle requireReadyHandle() {
@@ -452,7 +480,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     private IndexHandle requireReadyHandle(String knowledgeBaseId, long expectedRevision) {
         IndexHandle handle = requireHandle();
         requireIdentity(handle, knowledgeBaseId, expectedRevision);
-        KnowledgeBase latest = repository.findKnowledgeBase(handle.knowledgeBaseId()).orElseThrow();
+        KnowledgeBase latest = knowledgeBases.findKnowledgeBase(handle.knowledgeBaseId()).orElseThrow();
         if (latest.indexStatus() != IndexStatus.READY || latest.publishedIndexRevision() == null
                 || latest.sourceRevision() != handle.sourceRevision()
                 || latest.publishedIndexRevision() != handle.sourceRevision()) {
@@ -463,11 +491,12 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     }
 
     private void startFreshnessMonitoring() {
-        KnowledgeBase selected = activeKnowledgeBase;
-        if (selected == null) return;
-        List<Path> sources = repository.listSources(selected.id());
-        String currentHash = IndexIdentity.sourceSetHash(sources);
-        startFreshnessMonitoring(selected, sources, currentHash);
+        ActiveKnowledgeContext current = runtime.currentOrNull();
+        if (current == null) return;
+        KnowledgeBase selected = current.knowledgeBase();
+        List<Path> monitoredSources = sources.listSources(selected.id());
+        String currentHash = IndexIdentity.sourceSetHash(monitoredSources);
+        startFreshnessMonitoring(selected, monitoredSources, currentHash);
     }
 
     private void startFreshnessMonitoring(KnowledgeBase selected, List<Path> sources, String expectedHash) {
@@ -479,7 +508,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
             public void sourceVerified(SourceFreshnessMonitor.MonitorRequest verifiedRequest,
                                        SourceFingerprint fingerprint) {
                 if (freshnessEpoch.get() != epoch) return;
-                repository.recordSourceVerification(verifiedRequest.knowledgeBaseId(),
+                freshnessRecords.recordSourceVerification(verifiedRequest.knowledgeBaseId(),
                         verifiedRequest.sourceRevision(), fingerprint.hash(), fingerprint.verifiedAt());
                 refreshActiveKnowledgeBaseIf(verifiedRequest.knowledgeBaseId());
             }
@@ -490,16 +519,15 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                 if (freshnessEpoch.get() != epoch) return;
                 String observedHash = fingerprint == null ? null : fingerprint.hash();
                 Long verifiedAt = fingerprint == null ? null : fingerprint.verifiedAt();
-                if (repository.markIndexDirtyIfCurrent(invalidRequest.knowledgeBaseId(),
+                if (freshnessRecords.markIndexDirtyIfCurrent(invalidRequest.knowledgeBaseId(),
                         invalidRequest.sourceRevision(), reason, observedHash, verifiedAt)) {
                     synchronized (KnowledgeService.this) {
-                        if (activeKnowledgeBase != null
-                                && activeKnowledgeBase.id().equals(invalidRequest.knowledgeBaseId())) {
-                            activeKnowledgeBase = repository.findKnowledgeBase(invalidRequest.knowledgeBaseId())
+                        ActiveKnowledgeContext current = runtime.currentOrNull();
+                        if (current != null && current.knowledgeBaseId().equals(invalidRequest.knowledgeBaseId())) {
+                            KnowledgeBase invalidated = knowledgeBases.findKnowledgeBase(invalidRequest.knowledgeBaseId())
                                     .orElseThrow();
-                            engine.markStale();
-                            activeHandle = new IndexHandle(activeKnowledgeBase.id(),
-                                    activeKnowledgeBase.sourceRevision(), activeKnowledgeBase.indexStatus(), engine);
+                            current.indexHandle().engine().markStale();
+                            runtime.invalidate(context(invalidated, current.indexHandle().engine()));
                         }
                     }
                 }
@@ -510,12 +538,13 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     private void startFreshnessMonitoringAfterPublish(IndexManifest manifest) {
         KnowledgeBase selected;
         synchronized (this) {
-            if (activeKnowledgeBase == null
-                    || !activeKnowledgeBase.id().equals(manifest.knowledgeBaseId())
-                    || activeKnowledgeBase.sourceRevision() != manifest.sourceRevision()) return;
-            selected = activeKnowledgeBase;
+            ActiveKnowledgeContext current = runtime.currentOrNull();
+            if (current == null
+                    || !current.knowledgeBaseId().equals(manifest.knowledgeBaseId())
+                    || current.sourceRevision() != manifest.sourceRevision()) return;
+            selected = current.knowledgeBase();
         }
-        startFreshnessMonitoring(selected, repository.listSources(selected.id()), manifest.sourceSetHash());
+        startFreshnessMonitoring(selected, sources.listSources(selected.id()), manifest.sourceSetHash());
     }
 
     @Override
@@ -543,7 +572,25 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     }
 
     private void requireActive() {
-        if (activeKnowledgeBase == null) throw new IllegalStateException("尚未选择知识库");
+        runtime.current();
+    }
+
+    private ActiveKnowledgeContext context(KnowledgeBase knowledgeBase, SemanticSearchEngine engine) {
+        return new ActiveKnowledgeContext(knowledgeBase, freshnessMonitor.snapshot(),
+                new IndexHandle(knowledgeBase.id(), knowledgeBase.sourceRevision(), knowledgeBase.indexStatus(), engine));
+    }
+
+    private static SearchResultView toView(SearchResult result) {
+        return new SearchResultView(toView(result.chunk()), result.score(), result.reason());
+    }
+
+    private static CitationView toView(RagCitation citation) {
+        return new CitationView(citation.number(), toView(citation.chunk()), citation.score());
+    }
+
+    private static DocumentReference toView(DocumentChunk chunk) {
+        return new DocumentReference(chunk.id(), chunk.filePath(), chunk.fileName(), chunk.extension(),
+                chunk.startLine(), chunk.endLine(), chunk.content(), chunk.hasEmbedding());
     }
 
 }

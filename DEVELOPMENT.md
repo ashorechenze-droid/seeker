@@ -202,7 +202,7 @@ public record IndexBuildRequest(
 
 ## 8. RAG freshness 与隐私
 
-`KnowledgeService` 在召回和任何 HTTP 请求之前执行 freshness 校验：
+`AskUseCase` 在召回和任何 HTTP 请求之前执行 freshness 校验：
 
 ```text
 status == READY
@@ -213,7 +213,7 @@ SourceFreshnessMonitor proof == VERIFIED
 proof knowledgeBaseId/sourceRevision == 当前任务
 ```
 
-任一条件不满足都抛出本地错误。`KnowledgeService` 在召回前检查一次，并在 citations 准备完成、调用 `ChatModel` 前再次检查，缩小异步文件事件期间的发送窗口。`DIRTY`、`BUILDING`、`FAILED`、`INCOMPATIBLE`、`VERIFYING`、`UNAVAILABLE` 和 `STOPPED` 状态不会静默使用旧片段调用远程 API。
+任一条件不满足都抛出本地错误。`AskUseCase` 在召回前检查一次，并在 citations 准备完成、调用 `ChatModel` 前再次检查，缩小异步文件事件期间的发送窗口。`DIRTY`、`BUILDING`、`FAILED`、`INCOMPATIBLE`、`VERIFYING`、`UNAVAILABLE` 和 `STOPPED` 状态不会静默使用旧片段调用远程 API。
 
 允许调用时只发送最多 6 个召回片段的路径、行号、内容和用户问题，不发送整个知识库。API Key 使用 AES-GCM 加密存储；其安全级别是应用级本地保护，不是操作系统凭据保险库。
 
@@ -227,7 +227,7 @@ knowledgeBaseId + sourceRevision
 
 `KnowledgeController.TaskIdentity` 在启动搜索、高亮或问答时捕获。后台结果回到 UI 前再次比较当前 identity；知识库切换或 revision 变化后，旧搜索结果、旧高亮、旧引用和旧回答都会被丢弃。
 
-`clearWorkspace` 会取消正在运行的搜索、高亮和问答 worker。索引构建自身也会检查线程中断。
+`BackgroundTaskCoordinator` 是 `SwingWorker` 的唯一创建位置，统一负责取消、identity 比较、EDT progress/completion 回调和异常解包。`MainFrame.clearWorkspace` 只通过 `TaskHandle` 取消搜索、高亮和问答；索引构建自身继续检查线程中断。
 
 ## 10. 架构与依赖方向
 
@@ -257,10 +257,22 @@ com.simplerag
 │  ├─ freshness
 │  │  ├─ SourceFingerprint / FreshnessSnapshot
 │  │  └─ FreshnessGate
+│  ├─ runtime
+│  │  ├─ ActiveKnowledgeContext
+│  │  ├─ ActiveKnowledgeRuntime
+│  │  └─ IndexLifecycle
+│  ├─ dto
+│  │  ├─ DocumentReference / SearchResultView / CitationView
+│  │  └─ IndexBuildProgress / IndexBuildResult / AskResultView
 │  └─ usecase
-│     └─ KnowledgeService
+│     ├─ KnowledgeBaseUseCases / KnowledgeSourceUseCases
+│     ├─ IndexBuildUseCase / SearchUseCase / AskUseCase
+│     └─ ApiSettingsUseCase / DesktopQueryService
 ├─ adapter.in.swing
 │  ├─ MainFrame
+│  ├─ DesktopWorkspaceController（页面工作流协调）
+│  ├─ KnowledgePanel / SearchPanel / AskPanel / StatusBar
+│  ├─ BackgroundTaskCoordinator / DesktopFileGateway
 │  ├─ KnowledgeController
 │  ├─ SearchController
 │  ├─ AskController
@@ -282,9 +294,9 @@ com.simplerag
 Swing -> input ports -> use case -> output ports <- adapters
 ```
 
-只有 `AppCompositionRoot` 在生产代码中创建 SQLite、文件索引、ONNX、HTTP 和密钥 adapter。`MainFrame` 不再直接持有应用服务或基础设施，而是通过三个页面 controller 调用输入端口。
+只有 `AppCompositionRoot` 在生产代码中创建 SQLite、文件索引、ONNX、HTTP 和密钥 adapter，并显式共享唯一 `ActiveKnowledgeRuntime` 与 freshness monitor。`MainFrame` 不直接持有应用服务或基础设施，而是通过三个页面 controller 调用输入端口。
 
-检索层目前继续保留 `SemanticSearchEngine` 作为组合对象，但已把身份计算、manifest、向量兼容/评分和混合权重分别拆到 `IndexIdentity`、`IndexManifest`、`SemanticScorer` 与 `RankingPolicy`，避免兼容判断在搜索和高亮之间分叉。
+`SemanticSearchEngine` 是轻量组合对象。扫描、读取、分块、词法特征、查询分析、词法评分、语义评分、混合排名和高亮分别由 `DocumentScanner`、`DocumentReaderRegistry`、`ChunkerRegistry`、`LexicalFeatureExtractor`、`QueryAnalyzer`、`LexicalScorer`、`SemanticScorer`、`RankingPolicy` 与 `SemanticHighlightService` 承担。
 
 ## 11. ONNX 与模型下载
 
@@ -383,4 +395,48 @@ CourseFeaturesTest: knowledge-base CRUD and RAG API checks passed
 - 索引使用内存线性扫描，适合个人规模知识库；大量片段可后续接入 HNSW。
 - 当前 watcher/reconciliation 只监控本机当前活动知识库；切换到其他知识库时会重新加载索引并执行完整身份校验。
 - API Key 尚未接入 Windows Credential Manager。
-- Swing 视图仍可继续细分更小的布局组件，但业务调用、任务身份和基础设施依赖已经稳定在 controller/port 边界内，后续视图拆分不需要改变应用层。
+- `KnowledgeService` 仍保留兼容 facade，供既有命令行回归和构建流程复用；生产桌面组合中的搜索、问答和 API 设置已经直接装配独立用例。
+
+## 15. 第二阶段结构稳定化结果
+
+### 15.1 活动运行态
+
+```text
+ActiveKnowledgeContext
+  knowledgeBase + sourceRevision + IndexStatus
+  FreshnessSnapshot + IndexHandle
+            |
+            v
+ActiveKnowledgeRuntime（唯一原子写入入口）
+            |
+            v
+IndexLifecycle（restore/beginBuild/invalidate/publish/fail/refresh）
+```
+
+context 构造时校验 knowledge-base metadata 与 handle identity 完全一致。发布转换还要求 `publishedIndexRevision == sourceRevision`；跨知识库或跨 revision 转换会被拒绝。
+
+### 15.2 Swing 页面与 DTO 边界
+
+`KnowledgePanel`、`SearchPanel` 和 `AskPanel` 自行拥有控件、模型和渲染器，均有不创建 `JFrame` 的独立构造测试。`StatusBar` 单独管理全局状态。`DesktopWorkspaceController` 协调页面工作流，`MainFrame` 只保留窗口组合、模式导航和关闭流程。Swing 只消费 application DTO，不依赖 `DocumentChunk`、`SemanticSearchEngine` 或 `IndexHandle`。
+
+`BackgroundTaskCoordinator` 捕获 `knowledgeBaseId + sourceRevision`，在 EDT 应用结果前重新比较 identity。`DesktopFileGateway` 隔离 `java.awt.Desktop`。
+
+### 15.3 repository 与事务
+
+output port 已拆分为：
+
+```text
+KnowledgeBaseRepository
+KnowledgeSourceRepository
+IndexPublicationRepository
+FreshnessRepository
+SettingsRepository
+```
+
+生产环境仍由同一 `AppRepository` 聚合实现，并通过 `SqliteTransactionManager` 执行跨表事务。添加/删除 source 与 revision/`DIRTY` 更新不能部分提交；索引 manifest 与发布指针仍在同一条件事务内发布。
+
+### 15.4 架构决策与追踪
+
+- ADR 位于 [`docs/adr`](docs/adr)。
+- 工程问题、实现类和自动化证据位于 [`docs/REQUIREMENTS_TRACEABILITY.md`](docs/REQUIREMENTS_TRACEABILITY.md)。
+- `ArchitectureTest` 固定三层依赖、Swing DTO 边界、用例隔离、检索策略依赖和 `SwingWorker` 所有权。

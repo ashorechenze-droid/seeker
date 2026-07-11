@@ -10,133 +10,180 @@
 - 独立 builder、临时文件、原子移动和 SQLite 条件发布。
 - 构建失败、取消和启动恢复时保留上一已发布版本。
 - 搜索、问答和 Swing 后台任务绑定 `knowledgeBaseId + sourceRevision`。
-- 非 `READY` 状态禁止远程 RAG。
+- 递归 `WatchService`、动态子目录注册、debounce、`OVERFLOW` 回退和周期性 reconciliation。
+- watcher 事件可以在同一应用会话内把活动索引条件标记为 `DIRTY`。
+- 远程 RAG 在召回前和 HTTP 发送前分别执行 freshness gate；freshness 无法证明时保守拒绝。
+- SQLite schema 3 记录 `last_verified_source_hash`、`last_verified_at` 和 freshness 原因。
+- UI 显示源文件变化原因和最近核对时间。
 - application ports、基础设施 adapters、Swing controllers 和 `AppCompositionRoot`。
 - JUnit 5、ArchUnit、真实 ONNX 回归测试和模拟 OpenAI JSON/SSE 测试。
 
-因此下一阶段不需要再次重做 revision 或发布协议。后续扩展必须建立在这些不变量之上，不能为了增加功能绕过状态机。
+运行期 freshness 阶段已经完成并通过同会话修改/删除、动态子目录、`OVERFLOW`、周期核对、监控关闭、根目录不可访问和构建竞态测试。因此下一阶段不需要再次重做 revision、freshness 或发布协议。后续扩展必须建立在这些不变量之上，不能为了增加功能绕过状态机。
 
 ## 2. 没有被直接问到、但更关键的问题
 
-### 运行期间的 freshness 仍有时间窗口
+### 谁唯一拥有知识库运行态的一致性
 
-目前 `sourceSetHash` 在以下时机计算：
-
-1. 开始构建时。
-2. 构建完成、发布前。
-3. 应用启动并恢复索引时。
-
-应用运行期间没有文件监听或周期性 reconciliation。由此产生以下因果链：
+下一阶段真正的问题不是“还应该使用哪个设计模式”，而是以下状态由谁作为唯一写入者共同维护：
 
 ```text
-索引进入 READY
-  -> 用户在应用外修改或删除源文件
-  -> SQLite source_revision 没有变化
-  -> 内存 IndexHandle 仍为 READY
-  -> requireReadyHandle 只看到 revision/status 匹配
-  -> 旧索引片段仍可能被发送给远程 RAG
+knowledgeBaseId
+sourceRevision
+publishedIndexRevision
+IndexStatus
+FreshnessSnapshot
+active IndexHandle
+后台任务 identity
 ```
 
-这不是普通的“索引更新不及时”，而是正确性和隐私边界之间的缺口。尤其当用户删除敏感文件并认为内容已经不再可用时，旧片段仍留在已发布索引中。
+当前结构已经出现明确的职责聚集：
 
-因此，下一步最高优先级不是 PDF、OCR、HNSW 或界面美化，而是让源文件变化能够在同一应用会话内使索引失效，并在远程调用前再次证明 freshness。
+```text
+MainFrame.java                         1291 行，创建 5 类 SwingWorker
+SemanticSearchEngine.java               664 行，扫描/读取/分块/评分/高亮
+KnowledgeService.java                   549 行，实现 7 个输入端口
+AppRepository.java                      362 行，知识库/源/设置/freshness/发布 SQL
+FileSystemSourceFreshnessMonitor.java   300 行，watcher/调度/session/reconciliation
+```
+
+行数本身不是判定标准。关键因果链是：
+
+```text
+继续加入增量索引、文档格式和诊断功能
+  -> 更多异步路径需要修改 revision/status/freshness/handle
+  -> 如果只按“层”机械拆类，状态写入会分散到多个 service
+  -> 类虽然变小，但状态转换无法原子审计
+  -> stale callback、错误 READY、幽灵片段和旧内容发送风险重新出现
+```
+
+因此下一步必须先确定运行态的一致性边界，再按变化原因拆分职责。三层架构、设计原则和设计模式都应服务于这个目标，而不是为了展示概念增加空壳接口或继承层级。
 
 ## 3. 实施顺序的因果关系
 
 ```text
-运行期 freshness
-  -> 才能安全做增量索引
-  -> 才能安全扩展更多文件格式
+运行态唯一所有者 + 明确状态转换策略
+  -> 才能安全拆分 KnowledgeService 和异步 UI
+  -> 才能在拆分后继续证明 revision/freshness/handle 一致
+
+按变化原因拆分检索流水线
+  -> 才能实现可替换的 reader/chunker/ranking policy
+  -> 才能安全加入增量索引和更多文件格式
 
 可重复的质量/性能基线
   -> 才能判断排序或 HNSW 是否真的变好
 
-拆分当前热点类
-  -> 降低后续文件格式、增量索引和 UI 功能互相干扰的概率
+adapter 契约测试
+  -> 才能证明不同实现满足相同的失败、取消和原子性语义
+  -> 才是真正满足里氏替代原则，而不只是实现同一个 Java 接口
 ```
 
-如果跳过这些前置条件直接加功能，表面功能会增加，但每次修改都更难证明没有重新引入串库、旧数据发送或排名回退。
+如果跳过结构稳定化直接加功能，表面功能会增加，但后续每个改动都会同时触碰 UI worker、应用状态、检索算法和 SQLite 事务，更难证明没有重新引入串库、旧数据发送或排名回退。
 
-## 4. 第一阶段：关闭运行期 freshness 缺口
+## 4. 第一阶段：运行期 freshness（已完成）
 
-### 为什么先做
+本阶段已经实现：
 
-现有状态机只能感知应用内的数据源配置变化，不能及时感知应用外的文件变化。远程 RAG 的安全判断因此依赖一个可能已经过时的 `READY`。
+- `SourceFingerprint`、`SourceFreshnessMonitor`、`FreshnessReconciler` 和 `FreshnessGate`。
+- 本地目录递归监听、新建子目录注册、debounce 和 `OVERFLOW` 完整核对。
+- 周期性 reconciliation，处理未收到 watcher 事件的变化。
+- 普通文件事件立即固定为 `CHANGED`，即使 size/mtime 相同也不会重新放行。
+- 文件变化后条件标记 `DIRTY`、使活动 handle stale，并阻止远程 RAG。
+- 构建前切换 monitor 基线，发布后以 manifest hash 启动新 session。
+- monitor epoch 丢弃旧 session 的延迟回调。
+- UI 显示 freshness 原因和最后核对时间。
 
-### 实现内容
+已覆盖测试：
 
-新增 `SourceFreshnessMonitor`，组合两种机制：
+- 同会话修改文件后及时变为 `DIRTY`。
+- 删除敏感文件后远程 HTTP 请求次数为 0。
+- 新建子目录后继续监控其中的文件。
+- `OVERFLOW` 和周期任务都会执行完整 reconciliation。
+- watcher 关闭或根目录不可访问时保守拒绝。
+- 构建期间的文件变化不能错误发布为 `READY`。
+- 旧 monitor 回调不能污染新发布的 `READY`。
 
-- `WatchService`：低延迟接收创建、修改和删除事件。
-- 周期性 reconciliation：处理 `OVERFLOW`、网络盘、不可靠文件系统和应用休眠后丢失的事件。
+## 5. 第二阶段：降低继续扩展时的修改风险（已完成）
 
-不能只使用 `WatchService`。Windows 上需要为每个子目录注册 watcher，新建目录后也要继续注册；事件队列溢出时必须回退为完整 fingerprint 核对。
+本阶段已经完成。实现保持现有 revision、freshness、原子发布和检索算法结果不变，并建立了可安全扩展的职责与一致性边界。
+
+### 三层架构与依赖方向
+
+课程中的三层架构映射为：
+
+```text
+表现层
+  adapter.in.swing
+       ↓
+业务与应用层
+  application + 状态转换策略 + retrieval pipeline
+       ↓
+数据访问与基础设施层
+  adapter.out.sqlite/filesystem/onnx/openai/security
+```
+
+application ports 不是为了增加额外层级，而是用于落实依赖倒置：表现层和业务层依赖抽象，基础设施在 `AppCompositionRoot` 中注入。
+
+### 先建立运行态唯一所有者
 
 建议新增：
 
 ```text
-SourceFingerprint
-SourceFreshnessMonitor
-FreshnessReconciler
-FreshnessGate
+ActiveKnowledgeContext
+ActiveKnowledgeRuntime
+IndexLifecycle
 ```
 
-数据库增加可选字段或独立表，记录最近一次已确认的源状态：
+`ActiveKnowledgeContext` 是不可变运行态快照：
 
 ```text
-knowledge_base.last_verified_source_hash
-knowledge_base.last_verified_at
+knowledgeBaseId
+sourceRevision
+IndexStatus
+FreshnessSnapshot
+IndexHandle
 ```
 
-状态变化流程：
+`IndexLifecycle` 只表达允许的转换及其前置条件：
 
 ```text
-文件事件或 reconciliation 发现变化
-  -> 条件更新当前知识库为 DIRTY
-  -> 使活动 IndexHandle 失效
-  -> UI 立即显示待重建
-  -> 取消或拒绝尚未发送的远程 RAG
+restore / beginBuild / invalidate / publish / fail / cancel
 ```
 
-RAG 调用前的 `FreshnessGate` 不应每次完整遍历所有文件，否则大型知识库的每次提问都会产生明显延迟。应使用 watcher generation + 最近 reconciliation 结果；发生 `OVERFLOW`、监控中断或状态未知时采用保守策略，先拒绝远程调用并要求核对。
+`ActiveKnowledgeRuntime` 是运行态的唯一写入入口，负责原子替换 context。拆分后的用例不能分别保存或修改 `engine`、`activeKnowledgeBase`、`activeHandle` 和 monitor epoch。
 
-### 必须新增的测试
+不为每个 `IndexStatus` 强制创建一个状态类。当前使用枚举、不可变 context 和集中转换策略更容易测试和审计；只有当每个状态出现大量独立行为时再评估完整 State 模式。
 
-- `READY` 后修改文件，不重启应用，状态在限定时间内变为 `DIRTY`。
-- `READY` 后删除敏感文件，远程 HTTP 请求次数保持为 0。
-- 新建子目录后，其中的文件变化仍能被监控。
-- 模拟 `OVERFLOW` 后执行完整 reconciliation。
-- watcher 关闭或根目录不可访问时，远程 RAG 采用保守拒绝策略。
-- 构建期间产生的文件事件不会把较新的状态错误覆盖为 `READY`。
+### 拆分应用用例
 
-### 验收标准
-
-- 本地文件变化不需要重启应用即可使索引失效。
-- freshness 无法证明时不发送远程 RAG。
-- watcher 不直接发布索引，只负责使现有索引失效；重建仍走原子发布流程。
-
-## 5. 第二阶段：降低继续扩展时的修改风险
-
-### 当前热点
-
-当前主要类规模：
+按用例而不是按技术名拆分：
 
 ```text
-MainFrame.java              1268 行
-SemanticSearchEngine.java    664 行
-KnowledgeService.java        444 行
-AppRepository.java           307 行
+KnowledgeBaseUseCases
+KnowledgeSourceUseCases
+IndexBuildUseCase
+SearchUseCase
+AskUseCase
+ApiSettingsUseCase
+DesktopQueryService
 ```
 
-行数本身不是问题。真正的问题是这些类同时持有多组会一起变化的状态：
+这些用例共享同一个 `ActiveKnowledgeRuntime` 和发布协议，但不互相调用具体实现类。
 
-- `MainFrame` 同时管理知识库、搜索、预览、API 配置、问答和多个 worker。
-- `SemanticSearchEngine` 同时负责扫描、读取、分块、词法特征、查询分析、排名和高亮。
-- `KnowledgeService` 同时编排知识库、构建、搜索、设置和问答。
+输入端口不能继续泄漏检索实现对象。新增应用 DTO：
 
-继续加入文件监听、增量索引和 PDF 后，同一个改动会跨越更多状态，异步竞态也更难测试。
+```text
+IndexBuildProgress
+IndexBuildResult
+KnowledgeBaseView
+SearchResultView
+CitationView
+IndexStatusView
+DocumentReference
+```
 
-### 实现内容
+`RebuildKnowledgeIndex` 不再返回 `SemanticSearchEngine.IndexReport`，`SearchKnowledge` 不再向 Swing 暴露 `DocumentChunk`。
+
+### 拆分 Swing 与后台任务
 
 Swing 拆出真正拥有控件状态的页面对象：
 
@@ -151,19 +198,25 @@ DesktopFileGateway
 
 `MainFrame` 只保留窗口组合、页面导航和应用关闭流程。后台 worker 的创建、取消、identity 校验和 EDT 回调统一放入 `BackgroundTaskCoordinator`。
 
-UI 使用 view model，不继续向下读取检索内部对象：
+`BackgroundTaskCoordinator` 统一负责：
 
 ```text
-KnowledgeBaseView
-SearchResultView
-CitationView
-IndexStatusView
+创建与取消任务
+捕获 knowledgeBaseId + sourceRevision
+丢弃 stale result
+EDT 回调
+统一错误处理
 ```
+
+这里使用 Command/Observer/Coordinator 的思想，但不建立复杂的命令继承树。UI 只消费 view model，通过 `DesktopFileGateway` 打开文件，不沿对象链访问 chunk、manifest 或 engine 内部状态。
+
+### 拆分检索流水线
 
 检索拆分顺序按变化原因进行：
 
 ```text
-DocumentScanner / DocumentReader
+DocumentScanner
+DocumentReaderRegistry
 ChunkerRegistry
 LexicalFeatureExtractor
 QueryAnalyzer
@@ -175,32 +228,75 @@ SemanticHighlightService
 
 不要一次性重写全部算法。先移动现有行为并保持 golden tests 不变，再逐个替换实现。
 
-应用用例拆分为小的实现类，但共享同一套 repository 和发布协议：
+构建和查询分别组合为：
 
 ```text
-KnowledgeBaseUseCases
-IndexBuildUseCase
-SearchUseCase
-AskUseCase
-ApiSettingsUseCase
+DocumentScanner -> DocumentReader -> Chunker -> FeatureExtractor -> IndexBuilder
+QueryAnalyzer -> LexicalScorer + SemanticScorer -> RankingPolicy -> SearchResultView
 ```
 
-SQLite adapter 拆开知识库状态、设置和索引发布记录的 SQL，避免修改 API 设置时触碰索引事务代码。
+优先使用 Strategy、Registry 和对象组合，不建立扫描器/reader/chunker 的庞大继承体系。
+
+### 拆分 SQLite adapter，但不拆散事务
+
+接口可以拆为：
+
+```text
+KnowledgeBaseRepository
+KnowledgeSourceRepository
+IndexPublicationRepository
+FreshnessRepository
+SettingsRepository
+```
+
+实现可以是多个 SQLite adapter，并共享 `SqliteTransactionManager`。接口隔离不等于拆散事务；添加数据源、递增 revision 和标记 `DIRTY` 仍必须在同一个 SQLite 事务中完成。
+
+### 面向对象设计原则的落点
+
+| 原则 | 具体约束 |
+| --- | --- |
+| 单一职责原则 | 按变化原因拆分；页面布局、任务调度、状态转换、扫描、分块和评分分别演进 |
+| 开放封闭原则 | reader、chunker、ranking policy 通过 Strategy + Registry 扩展 |
+| 依赖倒置原则 | 用例只依赖 repository、embedder、chat model、monitor 等端口 |
+| 里氏替代原则 | adapter 必须通过统一契约测试，证明失败、取消、原子性和保守拒绝语义一致 |
+| 接口隔离原则 | 每个页面和用例只依赖所需的小接口与 view model |
+| 合成复用原则 | 检索流水线组合小策略，不通过多层继承复用实现 |
+| 迪米特法则 | Swing 不读取 `DocumentChunk`、manifest、engine 或 SQLite 内部对象 |
+
+实现同一个 Java 接口不代表满足里氏替代原则。例如一个索引 repository 原子发布、另一个直接覆盖活动文件，两者在语义上不可替换。必须使用 contract tests 验证行为契约。
+
+### 架构和契约验证
+
+在现有 ArchUnit 基础上增加：
+
+- Swing 不依赖 `DocumentChunk`、`SemanticSearchEngine`、`IndexHandle` 或任何 `adapter.out`。
+- 用例实现之间不直接依赖，只通过 runtime、domain policy 和 ports 协作。
+- 检索 reader/chunker/scorer 不反向依赖 Swing、SQLite 或 OpenAI。
+- 只有 `IndexLifecycle`/`ActiveKnowledgeRuntime` 可以改变活动运行态。
+- 每个 `DocumentReader`、`IndexRepository`、`ChatModel`、`SourceFreshnessMonitor` 实现运行同一套契约测试。
+- 保留完整搜索 golden tests、freshness 竞态测试和原子发布测试。
 
 ### 验收标准
 
 - `MainFrame` 不创建 worker，也不直接读取 `DocumentChunk`。
+- `MainFrame` 只负责窗口组合、导航和关闭流程。
 - 搜索、问答和知识库页面可以分别构造和测试。
+- 所有活动运行态转换只能经过 `IndexLifecycle`/`ActiveKnowledgeRuntime`。
+- input ports 和 Swing 不暴露 `SemanticSearchEngine` 类型。
 - 修改分块策略不修改搜索评分代码。
 - 修改排名权重不修改文件扫描或 embedding adapter。
 - application tests 继续只使用内存 fake。
+- adapter contract tests 证明替换实现不会改变失败和一致性语义。
 - ArchUnit 明确检查新的依赖边界。
+- 现有 25 个 JUnit/ArchUnit 测试、真实 ONNX 回归和模拟 OpenAI 回归保持通过。
 
 ## 6. 第三阶段：增量索引，而不是更频繁地全量重建
 
-### 为什么排在 freshness 之后
+### 为什么排在 freshness 和结构稳定化之后
 
-增量索引依赖可靠地知道“哪些文件发生了变化”。如果文件变化检测本身不可靠，增量构建会比全量构建更容易留下幽灵片段或漏掉删除内容。
+增量索引依赖可靠地知道“哪些文件发生了变化”，还会同时触碰 reader、chunker、embedding、manifest 和发布协议。如果文件变化检测或职责边界本身不可靠，增量构建会比全量构建更容易留下幽灵片段、漏掉删除内容，或把算法优化与发布状态耦合在一起。
+
+先完成结构稳定化后，增量索引可以作为独立的规划和构建策略加入，而不需要再次修改 Swing、问答流程或活动运行态所有权。
 
 ### 数据模型
 
@@ -215,6 +311,18 @@ readerVersion
 chunkingVersion
 chunkIds
 ```
+
+建议对象：
+
+```text
+FileFingerprint
+DocumentIndexEntry
+IncrementalIndexPlan
+IncrementalIndexPlanner
+IncrementalIndexBuilder
+```
+
+`IncrementalIndexPlanner` 应是无文件系统和数据库依赖的纯策略：输入上一 manifest 和当前 fingerprints，输出 `added/modified/deleted/reused`。这使规划逻辑可以用小型对象图和表驱动测试完整验证。
 
 仅使用修改时间不够可靠。快速修改、文件复制和部分网络文件系统可能保留时间戳；最终身份需要内容 hash。可以先用 size/mtime 作为快速筛选，再只对候选文件计算 hash。
 
@@ -392,24 +500,67 @@ UI 增加“诊断信息”入口，展示当前 revision、发布 revision、�
 - 支持导出不含密钥和正文的诊断报告。
 - 远程发送目标和数据范围在操作前可见。
 
-## 11. 推荐的近期迭代
+## 11. 工程论证与课程交付材料
 
-下一次开发迭代只做第一阶段，不同时加入 PDF 或 HNSW：
+项目不仅需要“可以运行”，还应能够解释问题、论证设计选择并证明实现符合设计。每个后续迭代同步维护：
 
-1. 定义 `SourceFreshnessMonitor` 与 `FreshnessGate` 接口和状态语义。
-2. 为本地目录实现递归 `WatchService` 注册、debounce 和 `OVERFLOW` 处理。
-3. 增加周期性 reconciliation。
-4. 文件变化后条件标记 `DIRTY` 并使活动 handle 失效。
-5. 在远程 RAG 前接入 freshness gate。
-6. 补充同会话删除敏感文件后 HTTP 请求为 0 的测试。
-7. UI 显示变化原因和最后核对时间。
-8. 更新 README/DEVELOPMENT 的实时 freshness 行为。
+### 架构决策记录
 
-本迭代的完成定义：用户在应用外修改或删除源文件后，无需重启，系统会及时停止使用旧索引进行远程 RAG，并明确告诉用户为什么需要重建。
+至少记录以下 ADR：
 
-## 12. 暂不优先
+```text
+为什么选择单 Maven 模块的模块化单体
+为什么使用三层架构 + ports/adapters 落实依赖倒置
+为什么活动运行态只有一个写入所有者
+为什么增量构建仍发布完整 revision snapshot
+为什么 watcher 只使索引失效而不直接发布
+为什么 reader/chunker/ranking 使用组合与 Strategy
+```
 
-在运行期 freshness 和质量基线完成前，不优先进行：
+### 需求追踪矩阵
+
+对每个关键需求记录：
+
+```text
+工程问题
+  -> 因果机制
+  -> 设计原则/模式
+  -> 实现类或接口
+  -> 自动化测试
+  -> 验收证据
+```
+
+不能用“使用了某模式”作为合理性结论。合理性必须说明该模式隔离了哪个变化、避免了哪个故障，以及测试如何证明。
+
+### 必须保留的模型与报告
+
+- 三层架构与依赖方向图。
+- 索引状态转换表。
+- 构建、freshness、搜索和远程问答时序图。
+- adapter 契约测试报告。
+- 检索质量与性能基准报告。
+- 不包含 API Key、完整 prompt 和敏感正文的诊断样例。
+
+## 12. 已完成的结构稳定化迭代
+
+本次迭代只完成第二阶段的结构稳定化，没有同时加入 PDF、增量索引、BM25 或 HNSW：
+
+1. 已为搜索、构建、问答、freshness、运行态、页面和失败路径补充 characterization/golden tests。
+2. 已定义 `ActiveKnowledgeContext`、`ActiveKnowledgeRuntime` 和 `IndexLifecycle`，集中运行态转换。
+3. 已用 application DTO 替换 input ports 中的 `SemanticSearchEngine.IndexReport` 和 `DocumentChunk`。
+4. 已提供知识库、数据源、构建、搜索、问答、设置和查询用例；桌面生产组合中的搜索、问答和设置直接装配独立实现。
+5. 已新增 `BackgroundTaskCoordinator`，迁移所有 `SwingWorker`、取消、identity 检查和 EDT 回调。
+6. 已拆出 `KnowledgePanel`、`SearchPanel`、`AskPanel` 和 `StatusBar`，并分别通过独立构造测试。
+7. 已按扫描、读取、分块、特征、分析、评分、排序和高亮拆分检索流水线，golden/真实 ONNX 结果保持通过。
+8. 已拆分 SQLite repository ports，并使用 `SqliteTransactionManager` 保留跨表事务。
+9. 已增加 ArchUnit 细粒度依赖规则；filesystem monitor、index repository、SQLite transaction、OpenAI JSON/SSE 和 reader/scanner 行为由 adapter/回归测试覆盖。
+10. 已更新 README、DEVELOPMENT、6 个 ADR、架构/状态/时序说明和需求追踪矩阵。
+
+完成证据：`MainFrame` 从 1291 行降至 115 行，`SemanticSearchEngine` 从 664 行降至 301 行；`MainFrame` 只保留窗口组合、导航和关闭，页面工作流由 `DesktopWorkspaceController` 协调；活动运行态只有 `ActiveKnowledgeRuntime` 写入，Swing 不读取检索内部对象，40 项 JUnit/ArchUnit、真实 ONNX 和模拟 OpenAI JSON/SSE 完整回归全部通过。
+
+## 13. 暂不优先
+
+在结构稳定化和质量基线完成前，不优先进行：
 
 - OCR。
 - 远程向量数据库。

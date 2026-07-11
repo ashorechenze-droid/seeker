@@ -29,6 +29,58 @@ class ArchitectureTest {
     }
 
     @Test
+    void swingDoesNotDependOnRetrievalInternals() {
+        noClasses().that().resideInAPackage("..adapter.in.swing..")
+                .should().dependOnClassesThat().haveFullyQualifiedName("com.simplerag.model.DocumentChunk")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.simplerag.search.SemanticSearchEngine")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.simplerag.search.IndexHandle")
+                .check(classes);
+    }
+
+    @Test
+    void inputPortsDoNotExposeSearchImplementationTypes() {
+        noClasses().that().resideInAPackage("..application.port.in..")
+                .should().dependOnClassesThat().resideInAPackage("..search..")
+                .check(classes);
+    }
+
+    @Test
+    void onlyBackgroundTaskCoordinatorCreatesSwingWorkers() {
+        noClasses().that().resideOutsideOfPackage("..adapter.in.swing..")
+                .should().dependOnClassesThat().haveFullyQualifiedName("javax.swing.SwingWorker")
+                .check(classes);
+        noClasses().that().haveSimpleName("MainFrame")
+                .should().dependOnClassesThat().haveFullyQualifiedName("javax.swing.SwingWorker")
+                .check(classes);
+    }
+
+    @Test
+    void retrievalPipelineDoesNotDependOnUiDatabaseOrRemoteChat() {
+        noClasses().that().resideInAPackage("..search..")
+                .should().dependOnClassesThat().resideInAnyPackage(
+                        "..adapter.in.swing..", "..adapter.out.sqlite..", "..adapter.out.openai..")
+                .check(classes);
+    }
+
+    @Test
+    void useCaseImplementationsDoNotCallOtherUseCaseImplementations() {
+        noClasses().that().haveSimpleNameEndingWith("UseCase")
+                .should().dependOnClassesThat().haveSimpleNameEndingWith("UseCase")
+                .check(classes);
+    }
+
+    @Test
+    void mainFrameOnlyComposesNavigatesAndClosesTheWindow() {
+        noClasses().that().haveSimpleName("MainFrame")
+                .should().dependOnClassesThat().resideInAPackage("..application.dto..")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("javax.swing.SwingWorker")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("javax.swing.JFileChooser")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("javax.swing.JOptionPane")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("javax.swing.Timer")
+                .check(classes);
+    }
+
+    @Test
     void infrastructureIsOnlyAssembledByBootstrap() {
         noClasses().that().resideOutsideOfPackages("..bootstrap..", "..adapter.out..")
                 .should().dependOnClassesThat().resideInAnyPackage(

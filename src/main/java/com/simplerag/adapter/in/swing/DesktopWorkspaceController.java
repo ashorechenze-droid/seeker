@@ -1,0 +1,286 @@
+package com.simplerag.adapter.in.swing;
+
+import com.simplerag.application.dto.AskResultView;
+import com.simplerag.application.dto.CitationView;
+import com.simplerag.application.dto.DocumentReference;
+import com.simplerag.application.dto.IndexBuildProgress;
+import com.simplerag.application.dto.IndexBuildResult;
+import com.simplerag.application.dto.SearchResultView;
+import com.simplerag.model.KnowledgeBase;
+import com.simplerag.model.KnowledgeStats;
+import com.simplerag.rag.ApiConfig;
+
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JButton;
+import javax.swing.JFileChooser;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
+import javax.swing.JTextField;
+import javax.swing.KeyStroke;
+import javax.swing.Timer;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.Toolkit;
+import java.awt.datatransfer.StringSelection;
+import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.function.Consumer;
+
+/** Coordinates desktop page workflows while MainFrame only composes and navigates the window. */
+public final class DesktopWorkspaceController {
+    private final KnowledgeController knowledge;
+    private final SearchController search;
+    private final AskController ask;
+    private final BackgroundTaskCoordinator tasks;
+    private final DesktopFileGateway files;
+    private final Consumer<KnowledgeBase> activeKnowledgeChanged;
+    private final StatusBar statusBar = new StatusBar();
+    private final AskPanel askPanel;
+    private final SearchPanel searchPanel;
+    private final KnowledgePanel knowledgePanel;
+    private final Timer searchTimer;
+    private final Timer statusResetTimer;
+    private final Timer freshnessTimer;
+    private BackgroundTaskCoordinator.TaskHandle searchTask;
+    private BackgroundTaskCoordinator.TaskHandle highlightTask;
+    private BackgroundTaskCoordinator.TaskHandle askTask;
+
+    public DesktopWorkspaceController(KnowledgeController knowledge, SearchController search, AskController ask,
+                                      BackgroundTaskCoordinator tasks, DesktopFileGateway files,
+                                      Consumer<KnowledgeBase> activeKnowledgeChanged) {
+        this.knowledge = knowledge;
+        this.search = search;
+        this.ask = ask;
+        this.tasks = tasks;
+        this.files = files;
+        this.activeKnowledgeChanged = activeKnowledgeChanged;
+        this.askPanel = new AskPanel(this::askQuestion, this::saveApiConfig, this::fetchModels, this::openCitation);
+        this.searchPanel = new SearchPanel(this::scheduleSearch, this::setPreview,
+                this::openSelectedFile, this::openSelectedDirectory, this::copySelectedChunk);
+        this.knowledgePanel = new KnowledgePanel(this::createKnowledgeBase, this::editKnowledgeBase,
+                this::deleteKnowledgeBase, this::switchKnowledgeBase, this::chooseSource,
+                this::removeSelectedSource, this::rebuildIndex);
+        this.searchTimer = new Timer(180, event -> performSearch());
+        searchTimer.setRepeats(false);
+        this.statusResetTimer = new Timer(4000, event -> statusBar.status("就绪"));
+        statusResetTimer.setRepeats(false);
+        this.freshnessTimer = new Timer(1000, event -> refreshFreshnessStatus());
+        freshnessTimer.setCoalesce(true);
+        freshnessTimer.start();
+        installQuestionShortcut();
+        askPanel.config(ask.config());
+        refreshAll();
+        setPreview(null);
+    }
+
+    public KnowledgePanel knowledgePanel() { return knowledgePanel; }
+    public SearchPanel searchPanel() { return searchPanel; }
+    public AskPanel askPanel() { return askPanel; }
+    public StatusBar statusBar() { return statusBar; }
+    public void focusSearch() { searchPanel.focusQuery(); }
+
+    public void initializeKnowledge(Path demoRoot) {
+        if (knowledge.sources().isEmpty() && knowledge.stats().chunks() == 0 && Files.isDirectory(demoRoot)) {
+            knowledge.addSource(demoRoot.toAbsolutePath().normalize());
+            refreshSourcesAndStats();
+        }
+        if (knowledge.stats().chunks() == 0 || (knowledge.semanticModelConfigured()
+                && !knowledge.semanticEnabled() && !knowledge.sources().isEmpty())) rebuildIndex();
+    }
+
+    public void close() {
+        freshnessTimer.stop(); searchTimer.stop(); statusResetTimer.stop(); clearTasks();
+    }
+
+    private void installQuestionShortcut() {
+        askPanel.questionArea().getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER,
+                Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "ask");
+        askPanel.questionArea().getActionMap().put("ask", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(ActionEvent event) { askQuestion(); }
+        });
+    }
+
+    private void refreshAll() { refreshKnowledgeBases(); refreshSourcesAndStats(); }
+    private void refreshKnowledgeBases() {
+        KnowledgeBase current = knowledge.current();
+        knowledgePanel.knowledgeBases(knowledge.knowledgeBases(), current);
+        if (current != null) activeKnowledgeChanged.accept(current);
+    }
+    private void refreshSourcesAndStats() {
+        knowledgePanel.sources(knowledge.sources());
+        KnowledgeStats stats = knowledge.stats();
+        knowledgePanel.stats(stats);
+        statusBar.semantic(knowledge.semanticStatus(), knowledge.semanticEnabled());
+        KnowledgeBase current = knowledge.current();
+        statusBar.freshness(knowledge.freshnessStatus(), current != null && !current.freshnessReason().isBlank());
+        searchPanel.extensions(knowledge.extensions());
+    }
+    private void refreshFreshnessStatus() {
+        try {
+            statusBar.semantic(knowledge.semanticStatus(), knowledge.semanticEnabled());
+            KnowledgeBase current = knowledge.current();
+            statusBar.freshness(knowledge.freshnessStatus(), current != null && !current.freshnessReason().isBlank());
+        } catch (RuntimeException ignored) { }
+    }
+
+    private void createKnowledgeBase() {
+        KnowledgeBaseInput input = showKnowledgeBaseDialog("新建知识库", "", "");
+        if (input == null) return;
+        try { knowledge.create(input.name(), input.description()); clearWorkspace(); refreshAll(); statusBar.status("知识库已创建"); }
+        catch (RuntimeException failure) { showError("无法创建知识库", failure); }
+    }
+    private void editKnowledgeBase() {
+        KnowledgeBase selected = knowledgePanel.selectedKnowledgeBase(); if (selected == null) return;
+        KnowledgeBaseInput input = showKnowledgeBaseDialog("编辑知识库", selected.name(), selected.description());
+        if (input == null) return;
+        try { knowledge.updateCurrent(input.name(), input.description()); refreshKnowledgeBases(); statusBar.status("知识库信息已更新"); }
+        catch (RuntimeException failure) { showError("无法更新知识库", failure); }
+    }
+    private void deleteKnowledgeBase() {
+        KnowledgeBase selected = knowledgePanel.selectedKnowledgeBase(); if (selected == null) return;
+        int answer = JOptionPane.showConfirmDialog(knowledgePanel,
+                "删除知识库“" + selected.name() + "”？\n源文件不会被删除，但该知识库的索引会被清理。",
+                "删除知识库", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (answer != JOptionPane.OK_OPTION) return;
+        try { knowledge.delete(selected.id()); clearWorkspace(); refreshAll(); statusBar.status("知识库已删除"); }
+        catch (Exception failure) { showError("无法删除知识库", failure); }
+    }
+    private void switchKnowledgeBase() {
+        KnowledgeBase selected = knowledgePanel.selectedKnowledgeBase(); KnowledgeBase current = knowledge.current();
+        if (selected == null || current != null && selected.id().equals(current.id())) return;
+        try { knowledge.select(selected.id()); clearWorkspace(); refreshSourcesAndStats(); activeKnowledgeChanged.accept(selected); statusBar.status("已切换到 “" + selected.name() + "”"); }
+        catch (RuntimeException failure) { showError("无法切换知识库", failure); }
+    }
+    private void chooseSource(ActionEvent event) {
+        JFileChooser chooser = new JFileChooser(); chooser.setDialogTitle("选择数据源目录");
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY); chooser.setMultiSelectionEnabled(true);
+        if (chooser.showOpenDialog(knowledgePanel) == JFileChooser.APPROVE_OPTION) {
+            for (java.io.File selected : chooser.getSelectedFiles()) knowledge.addSource(selected.toPath());
+            refreshSourcesAndStats(); rebuildIndex();
+        }
+    }
+    private void removeSelectedSource() {
+        Path selected = knowledgePanel.selectedSource(); if (selected == null) return;
+        knowledge.removeSource(selected); refreshSourcesAndStats(); rebuildIndex();
+    }
+
+    private void rebuildIndex() {
+        setIndexing(true, "正在扫描当前知识库...");
+        KnowledgeController.TaskIdentity identity = knowledge.identity();
+        tasks.<IndexBuildResult, IndexBuildProgress>submit(identity, knowledge::identity,
+                publish -> knowledge.rebuild(publish), values -> {
+                    IndexBuildProgress latest = values.get(values.size() - 1);
+                    knowledgePanel.progress(latest.processed(), latest.total());
+                    statusBar.status("正在" + latest.stage() + " " + latest.currentFile().getFileName()
+                            + "  ·  " + latest.processed() + "/" + latest.total());
+                }, report -> { refreshSourcesAndStats(); setIndexing(false,
+                        "索引完成：" + report.files() + " 个文件，" + report.chunks() + " 个片段"); performSearch(); },
+                failure -> { refreshSourcesAndStats(); setIndexing(false, "索引失败"); showError("无法建立索引", failure); },
+                () -> { refreshSourcesAndStats(); setIndexing(false, "索引结果已因知识库版本变化而丢弃"); });
+    }
+
+    private void performSearch() {
+        String query = searchPanel.query(); if (searchTask != null) searchTask.cancel();
+        if (query.isEmpty()) { searchPanel.clear(); return; }
+        String extension = searchPanel.extension(); KnowledgeController.TaskIdentity identity = knowledge.identity();
+        searchPanel.searching();
+        searchTask = tasks.submit(identity, knowledge::identity,
+                ignored -> search.search(identity, query, 80, extension), null, results -> {
+                    if (!query.equals(searchPanel.query())) return;
+                    searchPanel.results(results); statusBar.status(results.isEmpty() ? "当前知识库没有相关结果" : "检索完成");
+                }, failure -> { searchPanel.searchFailed(); statusBar.status(failure.getMessage()); }, () -> { });
+    }
+    private void setPreview(SearchResultView result) {
+        if (highlightTask != null) highlightTask.cancel(); searchPanel.preview(result);
+        if (result != null) locateSemanticMatches(result);
+    }
+    private void locateSemanticMatches(SearchResultView result) {
+        String query = searchPanel.query(); DocumentReference document = result.document();
+        if (query.isEmpty() || !document.semanticAvailable() || !knowledge.semanticEnabled()) return;
+        KnowledgeController.TaskIdentity identity = knowledge.identity(); searchPanel.semanticLoading(document);
+        highlightTask = tasks.submit(identity, knowledge::identity,
+                ignored -> search.highlights(identity, query, document, 2), null, highlights -> {
+                    SearchResultView selected = searchPanel.selected();
+                    if (selected == null || !selected.document().id().equals(document.id()) || !query.equals(searchPanel.query())) return;
+                    searchPanel.semanticHighlights(document, highlights);
+                }, failure -> searchPanel.semanticReset(document), () -> searchPanel.semanticReset(document));
+    }
+
+    private void saveApiConfig() {
+        try { ask.saveConfig(askPanel.config()); askPanel.apiStatus("API 配置已安全保存到本机", Theme.ACCENT); }
+        catch (RuntimeException failure) { showError("无法保存 API 配置", failure); }
+    }
+    private void fetchModels(JButton button) {
+        ApiConfig config = askPanel.config(); button.setEnabled(false); askPanel.apiStatus("正在连接 API 并获取模型...", Theme.MUTED);
+        tasks.<List<String>, Void>submit(null, null, ignored -> ask.fetchModels(config), null, models -> {
+            button.setEnabled(true); Object previous = askPanel.modelEditorValue(); askPanel.models(models, previous);
+            askPanel.apiStatus(models.isEmpty() ? "API 未返回可用模型" : "已获取 " + models.size() + " 个模型", Theme.ACCENT);
+        }, failure -> { button.setEnabled(true); askPanel.apiStatus(failure.getMessage(), Theme.RED); }, () -> button.setEnabled(true));
+    }
+    private void askQuestion() {
+        if (askTask != null && !askTask.isDone()) { askTask.cancel(); return; }
+        String question = askPanel.question(); if (question.isEmpty()) return; ApiConfig config = askPanel.config();
+        try { config.validateForChat(); ask.saveConfig(config); }
+        catch (RuntimeException failure) { showError("API 配置不完整", failure); return; }
+        askPanel.asking(true); KnowledgeController.TaskIdentity identity = knowledge.identity();
+        askPanel.answerTitle("正在检索并生成回答..."); askPanel.answer(""); askPanel.clearCitations();
+        askTask = tasks.<AskResultView, String>submit(identity, knowledge::identity, publish ->
+                ask.ask(identity, question, config,
+                        citations -> { if (isCurrentIdentity(identity)) publishCitations(citations); },
+                        delta -> { if (isCurrentIdentity(identity)) publish.accept(delta); }), chunks -> {
+                    for (String chunk : chunks) askPanel.appendAnswer(chunk); askPanel.answerCaret(askPanel.answerLength());
+                }, answer -> { askPanel.asking(false); askPanel.answerTitle("回答 · " + answer.model());
+                    if (askPanel.answerLength() == 0) askPanel.answer(answer.text()); askPanel.answerCaret(0);
+                    flashStatus("问答完成，引用 " + answer.citations().size() + " 个片段");
+                }, failure -> { askPanel.asking(false); askPanel.answerTitle("生成失败"); askPanel.answer(failure.getMessage()); flashStatus("问答失败"); },
+                () -> { askPanel.asking(false); askPanel.answerTitle("已停止"); flashStatus("问答已停止"); });
+    }
+    private void publishCitations(List<CitationView> citations) {
+        javax.swing.SwingUtilities.invokeLater(() -> { askPanel.citations(citations);
+            askPanel.answerTitle(citations.isEmpty() ? "未找到相关引用，正在生成..." : "正在生成回答..."); });
+    }
+
+    private void clearWorkspace() {
+        clearTasks(); askPanel.asking(false); searchPanel.clear(); askPanel.clearCitations();
+        askPanel.answerTitle("知识库回答"); askPanel.answer("当前知识库已切换，可以开始新的问答。"); setPreview(null);
+    }
+    private void clearTasks() {
+        if (searchTask != null && !searchTask.isDone()) searchTask.cancel();
+        if (highlightTask != null && !highlightTask.isDone()) highlightTask.cancel();
+        if (askTask != null && !askTask.isDone()) askTask.cancel();
+    }
+    private boolean isCurrentIdentity(KnowledgeController.TaskIdentity identity) { return identity.equals(knowledge.identity()); }
+    private void openSelectedFile() { SearchResultView selected = searchPanel.selected(); if (selected != null) openFile(selected.document().path()); }
+    private void openSelectedDirectory() { SearchResultView selected = searchPanel.selected(); if (selected != null) openFile(selected.document().path().getParent()); }
+    private void openCitation() { CitationView selected = askPanel.selectedCitation(); if (selected != null) openFile(selected.document().path()); }
+    private void openFile(Path path) { try { files.open(path); } catch (IOException failure) { showError("无法打开文件", failure); } }
+    private void copySelectedChunk() { SearchResultView selected = searchPanel.selected(); if (selected != null) {
+        Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(selected.document().content()), null); flashStatus("片段已复制"); } }
+    private void scheduleSearch() { searchTimer.restart(); }
+    private void flashStatus(String message) { statusBar.status(message); statusResetTimer.restart(); }
+    private void setIndexing(boolean indexing, String status) { knowledgePanel.indexing(indexing); statusBar.status(status); }
+
+    private KnowledgeBaseInput showKnowledgeBaseDialog(String title, String name, String description) {
+        JTextField nameField = new JTextField(name, 28); JTextArea descriptionField = new JTextArea(description, 4, 28);
+        descriptionField.setLineWrap(true); descriptionField.setWrapStyleWord(true); JPanel panel = new JPanel(); panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        JLabel nameLabel = new JLabel("名称"); nameLabel.setAlignmentX(Component.LEFT_ALIGNMENT); nameField.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JLabel descriptionLabel = new JLabel("描述"); descriptionLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JScrollPane descriptionScroll = new JScrollPane(descriptionField); descriptionScroll.setPreferredSize(new Dimension(380, 90)); descriptionScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.add(nameLabel); panel.add(Box.createVerticalStrut(5)); panel.add(nameField); panel.add(Box.createVerticalStrut(12)); panel.add(descriptionLabel); panel.add(Box.createVerticalStrut(5)); panel.add(descriptionScroll);
+        int result = JOptionPane.showConfirmDialog(knowledgePanel, panel, title, JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        return result == JOptionPane.OK_OPTION ? new KnowledgeBaseInput(nameField.getText(), descriptionField.getText()) : null;
+    }
+    private void showError(String title, Throwable failure) {
+        Throwable cause = failure; while (cause.getCause() != null) cause = cause.getCause(); String message = cause.getMessage();
+        JOptionPane.showMessageDialog(knowledgePanel, message == null ? failure.toString() : message, title, JOptionPane.ERROR_MESSAGE);
+    }
+    private record KnowledgeBaseInput(String name, String description) { }
+}

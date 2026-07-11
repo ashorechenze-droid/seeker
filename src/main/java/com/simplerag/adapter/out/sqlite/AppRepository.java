@@ -17,9 +17,11 @@ import java.util.UUID;
 public final class AppRepository implements com.simplerag.application.port.out.KnowledgeBaseRepository,
         com.simplerag.application.port.out.SettingsRepository {
     private final DatabaseManager database;
+    private final SqliteTransactionManager transactions;
 
     public AppRepository(DatabaseManager database) {
         this.database = database;
+        this.transactions = new SqliteTransactionManager(database);
     }
 
     public List<KnowledgeBase> listKnowledgeBases() {
@@ -107,28 +109,26 @@ public final class AppRepository implements com.simplerag.application.port.out.K
 
     public void addSource(String knowledgeBaseId, Path path) {
         String sql = "INSERT OR IGNORE INTO knowledge_source(knowledge_base_id, path) VALUES(?, ?)";
-        try (Connection connection = database.connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
-            connection.setAutoCommit(false);
-            statement.setString(1, knowledgeBaseId);
-            statement.setString(2, path.toAbsolutePath().normalize().toString());
-            if (statement.executeUpdate() == 1) markSourcesChanged(knowledgeBaseId, connection);
-            connection.commit();
-        } catch (SQLException failure) {
-            throw new DataAccessException("无法添加数据源", failure);
-        }
+        transactions.execute("无法添加数据源", connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, knowledgeBaseId);
+                statement.setString(2, path.toAbsolutePath().normalize().toString());
+                if (statement.executeUpdate() == 1) markSourcesChanged(knowledgeBaseId, connection);
+            }
+            return null;
+        });
     }
 
     public void removeSource(String knowledgeBaseId, Path path) {
         String sql = "DELETE FROM knowledge_source WHERE knowledge_base_id = ? AND path = ?";
-        try (Connection connection = database.connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
-            connection.setAutoCommit(false);
-            statement.setString(1, knowledgeBaseId);
-            statement.setString(2, path.toAbsolutePath().normalize().toString());
-            if (statement.executeUpdate() == 1) markSourcesChanged(knowledgeBaseId, connection);
-            connection.commit();
-        } catch (SQLException failure) {
-            throw new DataAccessException("无法移除数据源", failure);
-        }
+        transactions.execute("无法移除数据源", connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, knowledgeBaseId);
+                statement.setString(2, path.toAbsolutePath().normalize().toString());
+                if (statement.executeUpdate() == 1) markSourcesChanged(knowledgeBaseId, connection);
+            }
+            return null;
+        });
     }
 
     public Optional<String> getSetting(String key) {

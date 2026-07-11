@@ -6,7 +6,8 @@ import com.simplerag.application.port.in.ManageKnowledgeSources;
 import com.simplerag.application.port.in.RebuildKnowledgeIndex;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.KnowledgeStats;
-import com.simplerag.search.SemanticSearchEngine;
+import com.simplerag.application.dto.IndexBuildProgress;
+import com.simplerag.application.dto.IndexBuildResult;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -37,7 +38,7 @@ public final class KnowledgeController {
     public List<Path> sources() { return sources.roots(); }
     public void addSource(Path path) { sources.addSource(path); }
     public void removeSource(Path path) { sources.removeSource(path); }
-    public SemanticSearchEngine.IndexReport rebuild(Consumer<SemanticSearchEngine.IndexProgress> progress)
+    public IndexBuildResult rebuild(Consumer<IndexBuildProgress> progress)
             throws IOException { return rebuild.rebuildCurrent(progress); }
     public KnowledgeStats stats() { return readModel.stats(); }
     public Set<String> extensions() { return readModel.extensions(); }

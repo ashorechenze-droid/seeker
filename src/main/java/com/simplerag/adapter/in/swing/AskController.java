@@ -2,8 +2,8 @@ package com.simplerag.adapter.in.swing;
 
 import com.simplerag.application.port.in.AskKnowledge;
 import com.simplerag.application.port.in.ManageApiSettings;
-import com.simplerag.model.RagAnswer;
-import com.simplerag.model.RagCitation;
+import com.simplerag.application.dto.AskResultView;
+import com.simplerag.application.dto.CitationView;
 import com.simplerag.rag.ApiConfig;
 
 import java.io.IOException;
@@ -24,8 +24,8 @@ public final class AskController {
     public List<String> fetchModels(ApiConfig config) throws IOException, InterruptedException {
         return settings.fetchModels(config);
     }
-    public RagAnswer ask(KnowledgeController.TaskIdentity identity, String question, ApiConfig config,
-                         Consumer<List<RagCitation>> onCitations, Consumer<String> onDelta)
+    public AskResultView ask(KnowledgeController.TaskIdentity identity, String question, ApiConfig config,
+                         Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
             throws IOException, InterruptedException {
         return ask.askStream(identity.knowledgeBaseId(), identity.sourceRevision(), question, config,
                 onCitations, onDelta);
