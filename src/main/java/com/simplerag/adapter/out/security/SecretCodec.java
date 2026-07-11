@@ -1,4 +1,4 @@
-package com.simplerag.repository;
+package com.simplerag.adapter.out.security;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
@@ -9,7 +9,7 @@ import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Base64;
 
-public final class SecretCodec {
+public final class SecretCodec implements com.simplerag.application.port.out.SecretStore {
     private static final SecureRandom RANDOM = new SecureRandom();
 
     public String encrypt(String plaintext) {

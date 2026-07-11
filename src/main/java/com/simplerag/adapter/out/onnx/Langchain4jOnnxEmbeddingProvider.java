@@ -1,4 +1,6 @@
-package com.simplerag.embedding;
+package com.simplerag.adapter.out.onnx;
+
+import com.simplerag.embedding.EmbeddingProvider;
 
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
@@ -8,6 +10,7 @@ import dev.langchain4j.model.embedding.onnx.PoolingMode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +33,7 @@ public final class Langchain4jOnnxEmbeddingProvider implements EmbeddingProvider
     private final Path tokenizerPath;
     private volatile OnnxEmbeddingModel model;
     private volatile String status;
+    private volatile String fileSignature;
 
     public Langchain4jOnnxEmbeddingProvider() {
         this(Path.of(System.getProperty("simplerag.modelDir", "models/multilingual-minilm")));
@@ -93,6 +97,46 @@ public final class Langchain4jOnnxEmbeddingProvider implements EmbeddingProvider
     @Override
     public String status() {
         return status;
+    }
+
+    @Override
+    public int dimension() {
+        return 384;
+    }
+
+    @Override
+    public com.simplerag.search.EmbeddingModelSignature signature() {
+        return new com.simplerag.search.EmbeddingModelSignature(getClass().getName(), MODEL_NAME,
+                modelFilesSignature(), dimension(), 1);
+    }
+
+    private String modelFilesSignature() {
+        String current = fileSignature;
+        if (current != null) return current;
+        synchronized (this) {
+            if (fileSignature == null) {
+                try {
+                    MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                    updateDigest(digest, modelPath);
+                    updateDigest(digest, tokenizerPath);
+                    fileSignature = java.util.HexFormat.of().formatHex(digest.digest());
+                } catch (Exception failure) {
+                    fileSignature = "unavailable";
+                }
+            }
+            return fileSignature;
+        }
+    }
+
+    private static void updateDigest(MessageDigest digest, Path path) throws IOException {
+        if (!Files.isRegularFile(path)) return;
+        try (var input = Files.newInputStream(path)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read > 0) digest.update(buffer, 0, read);
+            }
+        }
     }
 
     @Override

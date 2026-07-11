@@ -1,5 +1,6 @@
 package com.simplerag.search;
 
+import com.simplerag.adapter.out.onnx.Langchain4jOnnxEmbeddingProvider;
 import com.simplerag.model.SearchResult;
 import com.simplerag.model.SemanticHighlight;
 
@@ -10,7 +11,7 @@ import java.util.List;
 public final class SemanticSearchEngineTest {
     public static void main(String[] args) throws Exception {
         Path knowledge = Path.of("examples", "knowledge").toAbsolutePath();
-        SemanticSearchEngine engine = new SemanticSearchEngine();
+        SemanticSearchEngine engine = new SemanticSearchEngine(new Langchain4jOnnxEmbeddingProvider());
         SemanticSearchEngine.IndexReport report = engine.index(List.of(knowledge), null);
 
         check(report.files() == 5, "应索引 5 个示例文件");
@@ -50,9 +51,10 @@ public final class SemanticSearchEngineTest {
         IndexStore store = new IndexStore(indexFile);
         store.save(engine.snapshot());
         IndexSnapshot restored = store.load().orElseThrow();
-        SemanticSearchEngine restoredEngine = new SemanticSearchEngine();
+        SemanticSearchEngine restoredEngine = new SemanticSearchEngine(new Langchain4jOnnxEmbeddingProvider());
         restoredEngine.restore(restored);
         check(restoredEngine.chunkCount() == engine.chunkCount(), "持久化后片段数应一致");
+        check(!restoredEngine.semanticEnabled(), "缺少 manifest 的快照不得恢复为兼容向量索引");
         Files.deleteIfExists(indexFile);
 
         System.out.println("SemanticSearchEngineTest: all checks passed");

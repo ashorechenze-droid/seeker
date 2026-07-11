@@ -13,7 +13,7 @@ if not exist "target\SimpleRAG-1.0-SNAPSHOT.jar" (
 set "JAVA_LAUNCHER=java"
 if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA_LAUNCHER=%JAVA_HOME%\bin\java.exe"
 
-"%JAVA_LAUNCHER%" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" com.simplerag.embedding.ModelDownloader models\multilingual-minilm
+"%JAVA_LAUNCHER%" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" com.simplerag.adapter.out.onnx.ModelDownloader models\multilingual-minilm
 if errorlevel 1 exit /b 1
 
 echo.

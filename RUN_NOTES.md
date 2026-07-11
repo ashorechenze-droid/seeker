@@ -62,5 +62,5 @@ mvn -q -DskipTests package
 
 - **已去除 Python 桥接**，改用 LangChain4j 的 in-process ONNX 组件（详见 DEVELOPMENT.md 5.9）。运行时不再需要 Python、NumPy 或 pip 包。
 - **JAR 体积变化**：因打包 onnxruntime（含全平台原生库）和 DJL tokenizer，自包含 JAR 从约 17 MB 增至约 130 MB。
-- **模型下载改为纯 Java**：`setup-semantic-model.cmd` 现调用 `com.simplerag.embedding.ModelDownloader`，不再依赖 Python 脚本。
+- **模型下载改为纯 Java**：`setup-semantic-model.cmd` 现调用 `com.simplerag.adapter.out.onnx.ModelDownloader`，不再依赖 Python 脚本。
 - 不再产生 `~/.simplerag/embedding.log` 进程日志。

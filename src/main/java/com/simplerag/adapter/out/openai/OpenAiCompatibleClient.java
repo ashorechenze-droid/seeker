@@ -1,4 +1,6 @@
-package com.simplerag.rag;
+package com.simplerag.adapter.out.openai;
+
+import com.simplerag.rag.ApiConfig;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,7 +24,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.function.Consumer;
 
-public final class OpenAiCompatibleClient {
+public final class OpenAiCompatibleClient implements com.simplerag.application.port.out.ChatModel {
     private final HttpClient httpClient;
     private final ObjectMapper json;
 

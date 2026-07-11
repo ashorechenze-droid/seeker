@@ -1,14 +1,15 @@
-package com.simplerag.ui;
+package com.simplerag.adapter.in.swing;
+
 
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.KnowledgeBase;
+import com.simplerag.model.KnowledgeStats;
 import com.simplerag.model.RagAnswer;
 import com.simplerag.model.RagCitation;
 import com.simplerag.model.SearchResult;
 import com.simplerag.model.SemanticHighlight;
 import com.simplerag.rag.ApiConfig;
 import com.simplerag.search.SemanticSearchEngine;
-import com.simplerag.service.KnowledgeService;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -70,7 +71,9 @@ public final class MainFrame extends JFrame {
     private static final String ASK_MODE = "ask";
     private static final Pattern HIGHLIGHT_TERM = Pattern.compile("[\\p{L}\\p{N}_-]{2,}");
 
-    private final KnowledgeService service;
+    private final KnowledgeController knowledgeController;
+    private final SearchController searchController;
+    private final AskController askController;
     private final CardLayout modeLayout = new CardLayout();
     private final JPanel modeCards = new JPanel(modeLayout);
     private final DefaultListModel<KnowledgeBase> knowledgeBaseModel = new DefaultListModel<>();
@@ -114,9 +117,12 @@ public final class MainFrame extends JFrame {
     private SwingWorker<List<SemanticHighlight>, Void> highlightWorker;
     private SwingWorker<RagAnswer, String> askWorker;
 
-    public MainFrame(KnowledgeService service) {
+    public MainFrame(KnowledgeController knowledgeController, SearchController searchController,
+                     AskController askController) {
         super("SimpleRAG - 本地语义知识库");
-        this.service = service;
+        this.knowledgeController = knowledgeController;
+        this.searchController = searchController;
+        this.askController = askController;
         this.searchTimer = new Timer(180, event -> performSearch());
         searchTimer.setRepeats(false);
         this.statusResetTimer = new Timer(4000, event -> statusLabel.setText("就绪"));
@@ -532,12 +538,14 @@ public final class MainFrame extends JFrame {
     }
 
     public void initializeKnowledge(Path demoRoot) {
-        if (service.roots().isEmpty() && service.stats().chunks() == 0 && Files.isDirectory(demoRoot)) {
-            service.addSource(demoRoot.toAbsolutePath().normalize());
+        if (knowledgeController.sources().isEmpty() && knowledgeController.stats().chunks() == 0
+                && Files.isDirectory(demoRoot)) {
+            knowledgeController.addSource(demoRoot.toAbsolutePath().normalize());
             refreshSourcesAndStats();
         }
-        if (service.stats().chunks() == 0
-                || (service.semanticModelConfigured() && !service.semanticEnabled() && !service.roots().isEmpty())) {
+        if (knowledgeController.stats().chunks() == 0
+                || (knowledgeController.semanticModelConfigured() && !knowledgeController.semanticEnabled()
+                && !knowledgeController.sources().isEmpty())) {
             rebuildIndex();
         }
     }
@@ -559,9 +567,9 @@ public final class MainFrame extends JFrame {
     private void refreshKnowledgeBases() {
         refreshingKnowledgeBases = true;
         knowledgeBaseModel.clear();
-        List<KnowledgeBase> items = service.knowledgeBases();
+        List<KnowledgeBase> items = knowledgeController.knowledgeBases();
         items.forEach(knowledgeBaseModel::addElement);
-        KnowledgeBase current = service.currentKnowledgeBase();
+        KnowledgeBase current = knowledgeController.current();
         if (current != null) {
             for (int i = 0; i < knowledgeBaseModel.size(); i++) {
                 if (knowledgeBaseModel.get(i).id().equals(current.id())) {
@@ -577,15 +585,15 @@ public final class MainFrame extends JFrame {
 
     private void refreshSourcesAndStats() {
         sourceModel.clear();
-        service.roots().forEach(sourceModel::addElement);
-        KnowledgeService.KnowledgeStats stats = service.stats();
+        knowledgeController.sources().forEach(sourceModel::addElement);
+        KnowledgeStats stats = knowledgeController.stats();
         statsLabel.setText(stats.files() + " 个文件  ·  " + stats.chunks() + " 个片段");
-        semanticLabel.setText(service.semanticStatus());
-        semanticLabel.setForeground(service.semanticEnabled() ? Theme.ACCENT : Theme.AMBER);
+        semanticLabel.setText(knowledgeController.semanticStatus());
+        semanticLabel.setForeground(knowledgeController.semanticEnabled() ? Theme.ACCENT : Theme.AMBER);
         Object selected = extensionFilter.getSelectedItem();
         DefaultComboBoxModel<String> filters = new DefaultComboBoxModel<>();
         filters.addElement("全部");
-        service.extensions().forEach(filters::addElement);
+        knowledgeController.extensions().forEach(filters::addElement);
         extensionFilter.setModel(filters);
         if (selected != null) extensionFilter.setSelectedItem(selected);
     }
@@ -594,7 +602,7 @@ public final class MainFrame extends JFrame {
         KnowledgeBaseInput input = showKnowledgeBaseDialog("新建知识库", "", "");
         if (input == null) return;
         try {
-            service.createKnowledgeBase(input.name(), input.description());
+            knowledgeController.create(input.name(), input.description());
             clearWorkspace();
             refreshAll();
             statusLabel.setText("知识库已创建");
@@ -609,7 +617,7 @@ public final class MainFrame extends JFrame {
         KnowledgeBaseInput input = showKnowledgeBaseDialog("编辑知识库", selected.name(), selected.description());
         if (input == null) return;
         try {
-            service.updateCurrentKnowledgeBase(input.name(), input.description());
+            knowledgeController.updateCurrent(input.name(), input.description());
             refreshKnowledgeBases();
             statusLabel.setText("知识库信息已更新");
         } catch (RuntimeException failure) {
@@ -625,7 +633,7 @@ public final class MainFrame extends JFrame {
                 "删除知识库", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
         if (answer != JOptionPane.OK_OPTION) return;
         try {
-            service.deleteKnowledgeBase(selected.id());
+            knowledgeController.delete(selected.id());
             clearWorkspace();
             refreshAll();
             statusLabel.setText("知识库已删除");
@@ -636,10 +644,10 @@ public final class MainFrame extends JFrame {
 
     private void switchKnowledgeBase() {
         KnowledgeBase selected = knowledgeBaseList.getSelectedValue();
-        KnowledgeBase current = service.currentKnowledgeBase();
+        KnowledgeBase current = knowledgeController.current();
         if (selected == null || current != null && selected.id().equals(current.id())) return;
         try {
-            service.selectKnowledgeBase(selected.id());
+            knowledgeController.select(selected.id());
             clearWorkspace();
             refreshSourcesAndStats();
             currentKnowledgeLabel.setText(selected.name());
@@ -655,7 +663,7 @@ public final class MainFrame extends JFrame {
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         chooser.setMultiSelectionEnabled(true);
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            for (java.io.File selected : chooser.getSelectedFiles()) service.addSource(selected.toPath());
+            for (java.io.File selected : chooser.getSelectedFiles()) knowledgeController.addSource(selected.toPath());
             refreshSourcesAndStats();
             rebuildIndex();
         }
@@ -664,7 +672,7 @@ public final class MainFrame extends JFrame {
     private void removeSelectedSource() {
         Path selected = sourceList.getSelectedValue();
         if (selected == null) return;
-        service.removeSource(selected);
+        knowledgeController.removeSource(selected);
         refreshSourcesAndStats();
         rebuildIndex();
     }
@@ -673,7 +681,7 @@ public final class MainFrame extends JFrame {
         setIndexing(true, "正在扫描当前知识库...");
         new SwingWorker<SemanticSearchEngine.IndexReport, SemanticSearchEngine.IndexProgress>() {
             @Override protected SemanticSearchEngine.IndexReport doInBackground() throws Exception {
-                return service.rebuildCurrent(this::publish);
+                return knowledgeController.rebuild(this::publish);
             }
 
             @Override protected void process(List<SemanticSearchEngine.IndexProgress> values) {
@@ -692,6 +700,7 @@ public final class MainFrame extends JFrame {
                     setIndexing(false, "索引完成：" + report.files() + " 个文件，" + report.chunks() + " 个片段");
                     performSearch();
                 } catch (Exception failure) {
+                    refreshSourcesAndStats();
                     setIndexing(false, "索引失败");
                     showError("无法建立索引", failure);
                 }
@@ -709,14 +718,16 @@ public final class MainFrame extends JFrame {
             return;
         }
         String extension = String.valueOf(extensionFilter.getSelectedItem());
+        KnowledgeController.TaskIdentity identity = knowledgeController.identity();
         resultSummary.setText("检索中...");
         searchWorker = new SwingWorker<>() {
             @Override protected List<SearchResult> doInBackground() {
-                return service.search(query, 80, extension);
+                return searchController.search(identity, query, 80, extension);
             }
 
             @Override protected void done() {
-                if (isCancelled() || !query.equals(searchField.getText().strip())) return;
+                if (isCancelled() || !query.equals(searchField.getText().strip())
+                        || !isCurrentIdentity(identity)) return;
                 try {
                     List<SearchResult> results = get();
                     results.forEach(resultModel::addElement);
@@ -764,18 +775,20 @@ public final class MainFrame extends JFrame {
     private void locateSemanticMatches(SearchResult result) {
         String query = searchField.getText().strip();
         DocumentChunk chunk = result.chunk();
-        if (query.isEmpty() || !chunk.hasEmbedding() || !service.semanticEnabled()) return;
+        if (query.isEmpty() || !chunk.hasEmbedding() || !knowledgeController.semanticEnabled()) return;
+        KnowledgeController.TaskIdentity identity = knowledgeController.identity();
         String baseMeta = chunk.path() + "  ·  L" + chunk.startLine() + "-" + chunk.endLine();
         previewMeta.setText(baseMeta + "  ·  定位语义片段...");
         highlightWorker = new SwingWorker<>() {
             @Override protected List<SemanticHighlight> doInBackground() throws Exception {
-                return service.semanticHighlights(query, chunk, 2);
+                return searchController.highlights(identity, query, chunk, 2);
             }
 
             @Override protected void done() {
                 SearchResult selected = resultList.getSelectedValue();
                 if (isCancelled() || selected == null || !selected.chunk().id().equals(chunk.id())
-                        || !query.equals(searchField.getText().strip())) return;
+                        || !query.equals(searchField.getText().strip())
+                        || !isCurrentIdentity(identity)) return;
                 try {
                     List<SemanticHighlight> highlights = get();
                     previewArea.getHighlighter().removeAllHighlights();
@@ -828,7 +841,7 @@ public final class MainFrame extends JFrame {
     }
 
     private void loadApiConfig() {
-        ApiConfig config = service.apiConfig();
+        ApiConfig config = askController.config();
         apiUrlField.setText(config.baseUrl());
         apiKeyField.setText(config.apiKey());
         if (!config.model().isBlank()) apiModelCombo.addItem(config.model());
@@ -847,7 +860,7 @@ public final class MainFrame extends JFrame {
     private void saveApiConfig() {
         try {
             ApiConfig config = apiConfigFromFields();
-            service.saveApiConfig(config);
+            askController.saveConfig(config);
             apiStatusLabel.setForeground(Theme.ACCENT);
             apiStatusLabel.setText("API 配置已安全保存到本机");
         } catch (RuntimeException failure) {
@@ -862,7 +875,7 @@ public final class MainFrame extends JFrame {
         apiStatusLabel.setText("正在连接 API 并获取模型...");
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() throws Exception {
-                return service.fetchModels(config);
+                return askController.fetchModels(config);
             }
 
             @Override protected void done() {
@@ -894,20 +907,24 @@ public final class MainFrame extends JFrame {
         ApiConfig config = apiConfigFromFields();
         try {
             config.validateForChat();
-            service.saveApiConfig(config);
+            askController.saveConfig(config);
         } catch (RuntimeException failure) {
             showError("API 配置不完整", failure);
             return;
         }
         setAsking(true);
+        KnowledgeController.TaskIdentity identity = knowledgeController.identity();
         answerTitle.setText("正在检索并生成回答...");
         answerArea.setText("");
         citationModel.clear();
         askWorker = new SwingWorker<>() {
             @Override protected RagAnswer doInBackground() throws Exception {
-                return service.askStream(question, config,
-                        citations -> publishCitations(citations),
-                        delta -> publish(delta));
+                return askController.ask(identity, question, config,
+                        citations -> {
+                            if (isCurrentIdentity(identity)) publishCitations(citations);
+                        }, delta -> {
+                            if (isCurrentIdentity(identity)) publish(delta);
+                        });
             }
 
             @Override protected void process(List<String> chunks) {
@@ -918,7 +935,7 @@ public final class MainFrame extends JFrame {
 
             @Override protected void done() {
                 setAsking(false);
-                if (isCancelled()) {
+                if (isCancelled() || !isCurrentIdentity(identity)) {
                     answerTitle.setText("已停止");
                     flashStatus("问答已停止");
                     return;
@@ -961,6 +978,8 @@ public final class MainFrame extends JFrame {
     }
 
     private void clearWorkspace() {
+        if (searchWorker != null && !searchWorker.isDone()) searchWorker.cancel(true);
+        if (highlightWorker != null && !highlightWorker.isDone()) highlightWorker.cancel(true);
         if (askWorker != null && !askWorker.isDone()) askWorker.cancel(true);
         setAsking(false);
         resultModel.clear();
@@ -969,6 +988,10 @@ public final class MainFrame extends JFrame {
         answerTitle.setText("知识库回答");
         answerArea.setText("当前知识库已切换，可以开始新的问答。");
         setPreview(null);
+    }
+
+    private boolean isCurrentIdentity(KnowledgeController.TaskIdentity identity) {
+        return identity.equals(knowledgeController.identity());
     }
 
     private void openSelectedFile() {

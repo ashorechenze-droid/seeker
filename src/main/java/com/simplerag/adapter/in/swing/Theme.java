@@ -1,4 +1,4 @@
-package com.simplerag.ui;
+package com.simplerag.adapter.in.swing;
 
 import com.formdev.flatlaf.FlatDarkLaf;
 

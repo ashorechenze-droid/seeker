@@ -3,7 +3,7 @@ setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
 
-call mvn.cmd -q clean test-compile -DskipTests package
+call mvn.cmd -q clean test package
 if errorlevel 1 exit /b 1
 
 set "JAVA_LAUNCHER=java"

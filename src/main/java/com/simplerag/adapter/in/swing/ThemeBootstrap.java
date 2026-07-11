@@ -1,4 +1,4 @@
-package com.simplerag.ui;
+package com.simplerag.adapter.in.swing;
 
 public final class ThemeBootstrap {
     private ThemeBootstrap() {

@@ -1,4 +1,4 @@
-package com.simplerag.embedding;
+package com.simplerag.adapter.out.onnx;
 
 import java.io.IOException;
 import java.io.InputStream;

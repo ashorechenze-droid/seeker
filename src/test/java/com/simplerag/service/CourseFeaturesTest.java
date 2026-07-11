@@ -1,13 +1,15 @@
 package com.simplerag.service;
 
+import com.simplerag.adapter.out.filesystem.FileSystemIndexRepository;
+import com.simplerag.application.usecase.KnowledgeService;
 import com.simplerag.embedding.EmbeddingProvider;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.RagAnswer;
 import com.simplerag.rag.ApiConfig;
-import com.simplerag.rag.OpenAiCompatibleClient;
-import com.simplerag.repository.AppRepository;
-import com.simplerag.repository.DatabaseManager;
-import com.simplerag.repository.SecretCodec;
+import com.simplerag.adapter.out.openai.OpenAiCompatibleClient;
+import com.simplerag.adapter.out.sqlite.AppRepository;
+import com.simplerag.adapter.out.sqlite.DatabaseManager;
+import com.simplerag.adapter.out.security.SecretCodec;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -35,8 +37,8 @@ public final class CourseFeaturesTest {
         HttpServer server = mockApi(authorization, chatRequest);
         server.start();
 
-        KnowledgeService service = new KnowledgeService(new FakeEmbeddingProvider(), database,
-                new SecretCodec(), new OpenAiCompatibleClient(), work.resolve("indexes"));
+        KnowledgeService service = new KnowledgeService(new FakeEmbeddingProvider(), repository, repository,
+                new SecretCodec(), new OpenAiCompatibleClient(), new FileSystemIndexRepository(work.resolve("indexes")));
         service.restore();
         check(service.currentKnowledgeBase().id().equals(first.id()), "应选择第一个知识库");
 
@@ -148,6 +150,7 @@ public final class CourseFeaturesTest {
 
         @Override public String modelName() { return "fake-test-model"; }
         @Override public String status() { return "test-ready"; }
+        @Override public int dimension() { return 8; }
         @Override public void close() { }
     }
 }

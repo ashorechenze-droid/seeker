@@ -1,7 +1,6 @@
 package com.simplerag.search;
 
-import com.simplerag.embedding.EmbeddingProvider;
-import com.simplerag.embedding.Langchain4jOnnxEmbeddingProvider;
+import com.simplerag.application.port.out.TextEmbedder;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.SearchResult;
 import com.simplerag.model.SemanticHighlight;
@@ -10,6 +9,7 @@ import java.io.IOException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.io.InterruptedIOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -62,22 +62,29 @@ public final class SemanticSearchEngine {
     );
     private static final Map<String, List<String>> CONCEPTS = createConcepts();
 
-    private final EmbeddingProvider embeddingProvider;
+    private final TextEmbedder embeddingProvider;
+    private final SemanticScorer semanticScorer;
+    private final RankingPolicy rankingPolicy;
     private volatile State state = State.empty();
     private volatile List<String> roots = List.of();
     private volatile long indexedAt;
     private volatile boolean embeddingsActive;
+    private volatile boolean semanticCompatible;
+    private volatile IndexManifest manifest;
     private String cachedQueryText = "";
     private float[] cachedQueryEmbedding;
     private String highlightCacheQuery = "";
     private final Map<String, List<SemanticHighlight>> highlightCache = new HashMap<>();
 
-    public SemanticSearchEngine() {
-        this(new Langchain4jOnnxEmbeddingProvider());
+    public SemanticSearchEngine(TextEmbedder embeddingProvider) {
+        this(embeddingProvider, new SemanticScorer(), RankingPolicy.defaultPolicy());
     }
 
-    public SemanticSearchEngine(EmbeddingProvider embeddingProvider) {
+    public SemanticSearchEngine(TextEmbedder embeddingProvider, SemanticScorer semanticScorer,
+                                RankingPolicy rankingPolicy) {
         this.embeddingProvider = embeddingProvider;
+        this.semanticScorer = semanticScorer;
+        this.rankingPolicy = rankingPolicy;
     }
 
     public IndexReport index(List<Path> sourceRoots, Consumer<IndexProgress> progress) throws IOException {
@@ -87,6 +94,7 @@ public final class SemanticSearchEngine {
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         List<Path> files = new ArrayList<>();
         for (Path root : normalizedRoots) {
+            checkInterrupted();
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
@@ -109,6 +117,7 @@ public final class SemanticSearchEngine {
         int processed = 0;
         int skipped = 0;
         for (Path file : files) {
+            checkInterrupted();
             Path owner = findOwner(file, normalizedRoots);
             try {
                 chunks.addAll(chunkFile(file, owner));
@@ -126,6 +135,7 @@ public final class SemanticSearchEngine {
             List<DocumentChunk> embeddedChunks = new ArrayList<>(chunks.size());
             final int batchSize = 24;
             for (int start = 0; start < chunks.size(); start += batchSize) {
+                checkInterrupted();
                 int end = Math.min(chunks.size(), start + batchSize);
                 List<DocumentChunk> batch = chunks.subList(start, end);
                 List<String> texts = batch.stream()
@@ -145,6 +155,7 @@ public final class SemanticSearchEngine {
             }
             chunks = embeddedChunks;
             embeddingsActive = true;
+            semanticCompatible = true;
         }
 
         clearHighlightCache();
@@ -161,16 +172,18 @@ public final class SemanticSearchEngine {
         }
         State current = state;
         Map<String, Double> queryTokens = weightedTokens(cleaned, true);
-        if (queryTokens.isEmpty() && !(embeddingProvider.isConfigured() && current.hasEmbeddings)) {
+        if (queryTokens.isEmpty() && !semanticCompatible) {
             return List.of();
         }
         Map<String, Double> queryVector = tfIdf(queryTokens, current.documentFrequency, current.chunks.size());
         double queryNorm = norm(queryVector);
         float[] semanticQuery = null;
-        if (embeddingProvider.isConfigured() && current.hasEmbeddings) {
+        if (semanticCompatible) {
             try {
                 semanticQuery = semanticQuery(cleaned);
-                embeddingsActive = true;
+                if (!semanticScorer.queryCompatible(semanticQuery,
+                        current.chunks.stream().map(item -> item.chunk).toList())) semanticQuery = null;
+                embeddingsActive = semanticQuery != null;
             } catch (IOException ignored) {
                 embeddingsActive = false;
             }
@@ -198,10 +211,11 @@ public final class SemanticSearchEngine {
             double conceptBoost = Math.min(0.30, conceptMatches * 0.10);
             double lexicalScore = cosine * 0.74 + exactBoost + nameBoost + conceptBoost;
             double semanticScore = semanticQuery != null && chunk.hasEmbedding()
-                    ? Math.max(0.0, cosine(semanticQuery, chunk.embedding())) : 0.0;
-            double score = semanticQuery == null ? lexicalScore : semanticScore * 0.78 + lexicalScore * 0.22;
-            if (lexicalScore >= 0.045 || semanticScore >= 0.22) {
-                String reason = semanticScore >= 0.22 && semanticScore >= lexicalScore
+                    ? Math.max(0.0, semanticScorer.score(semanticQuery, chunk.embedding())) : 0.0;
+            double score = rankingPolicy.combine(semanticScore, lexicalScore, semanticQuery != null);
+            if (lexicalScore >= rankingPolicy.lexicalResultThreshold()
+                    || semanticScore >= rankingPolicy.semanticResultThreshold()) {
+                String reason = semanticScore >= rankingPolicy.semanticResultThreshold() && semanticScore >= lexicalScore
                         ? "向量语义匹配" : conceptMatches > 0 ? "语义概念匹配"
                         : exactBoost > 0 ? "原文匹配" : "内容相似";
                 results.add(new SearchResult(chunk, Math.min(1.0, score), reason));
@@ -216,7 +230,7 @@ public final class SemanticSearchEngine {
             throws IOException {
         String cleaned = query == null ? "" : query.strip();
         if (cleaned.isEmpty() || chunk == null || !chunk.hasEmbedding()
-                || !embeddingProvider.isConfigured() || limit <= 0) {
+                || !semanticCompatible || limit <= 0) {
             return List.of();
         }
         List<SemanticHighlight> cached = cachedHighlights(cleaned, chunk, limit);
@@ -248,7 +262,7 @@ public final class SemanticSearchEngine {
         List<ScoredSpan> scored = new ArrayList<>(candidates.size());
         for (int i = 0; i < candidates.size(); i++) {
             TextSpan span = candidates.get(i);
-            double similarity = Math.max(0.0, cosine(queryVector, vectors.get(i)));
+            double similarity = Math.max(0.0, semanticScorer.score(queryVector, vectors.get(i)));
             double lengthPenalty = Math.min(0.055, Math.log1p(span.text().length() / 90.0) * 0.018);
             scored.add(new ScoredSpan(span, similarity, similarity - lengthPenalty));
         }
@@ -272,14 +286,20 @@ public final class SemanticSearchEngine {
         this.state = State.build(snapshot.chunks());
         this.roots = List.copyOf(snapshot.roots());
         this.indexedAt = snapshot.indexedAt();
-        this.embeddingsActive = state.hasEmbeddings && embeddingProvider.isConfigured()
-                && embeddingProvider.modelName().equals(snapshot.embeddingModel());
+        this.manifest = snapshot.manifest();
+        this.semanticCompatible = isSemanticCompatible(snapshot);
+        this.embeddingsActive = semanticCompatible;
     }
 
     public IndexSnapshot snapshot() {
         List<DocumentChunk> chunks = state.chunks.stream().map(indexed -> indexed.chunk).toList();
         return new IndexSnapshot(IndexSnapshot.CURRENT_VERSION, roots, chunks, indexedAt,
-                state.hasEmbeddings ? embeddingProvider.modelName() : "");
+                state.hasEmbeddings ? embeddingProvider.modelName() : "", manifest);
+    }
+
+    public IndexSnapshot snapshot(IndexManifest value) {
+        this.manifest = value;
+        return snapshot();
     }
 
     public List<String> roots() {
@@ -300,7 +320,13 @@ public final class SemanticSearchEngine {
     }
 
     public boolean semanticEnabled() {
-        return embeddingsActive && state.hasEmbeddings;
+        return semanticCompatible && embeddingsActive && state.hasEmbeddings;
+    }
+
+    public void markStale() {
+        semanticCompatible = false;
+        embeddingsActive = false;
+        clearHighlightCache();
     }
 
     public boolean semanticModelConfigured() {
@@ -310,7 +336,19 @@ public final class SemanticSearchEngine {
     public String semanticStatus() {
         if (!embeddingProvider.isConfigured()) return "未安装语义模型";
         if (!state.hasEmbeddings) return "模型已安装，需重建索引";
+        if (!semanticCompatible) return "索引向量与当前模型不兼容，需重建";
         return embeddingProvider.status();
+    }
+
+    private boolean isSemanticCompatible(IndexSnapshot snapshot) {
+        return state.hasEmbeddings && semanticScorer.compatible(embeddingProvider, snapshot.manifest(),
+                state.chunks.stream().map(item -> item.chunk).toList());
+    }
+
+    private static void checkInterrupted() throws InterruptedIOException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedIOException("索引构建已取消");
+        }
     }
 
     private synchronized void clearHighlightCache() {
@@ -515,19 +553,6 @@ public final class SemanticSearchEngine {
 
     private static double norm(Map<String, Double> vector) {
         return Math.sqrt(vector.values().stream().mapToDouble(value -> value * value).sum());
-    }
-
-    private static double cosine(float[] left, float[] right) {
-        if (left == null || right == null || left.length != right.length || left.length == 0) return 0;
-        double dot = 0;
-        double leftNorm = 0;
-        double rightNorm = 0;
-        for (int i = 0; i < left.length; i++) {
-            dot += left[i] * right[i];
-            leftNorm += left[i] * left[i];
-            rightNorm += right[i] * right[i];
-        }
-        return leftNorm == 0 || rightNorm == 0 ? 0 : dot / Math.sqrt(leftNorm * rightNorm);
     }
 
     private static String normalizeText(String value) {
