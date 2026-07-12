@@ -16,13 +16,15 @@ public interface AskKnowledge {
      */
     AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question,
                             List<ChatMessage> history, ApiConfig config,
-                            Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
+                            Consumer<List<CitationView>> onCitations, RemoteSendAuthorizer authorizer,
+                            Consumer<String> onDelta)
             throws IOException, InterruptedException;
 
     /** Single-turn convenience with empty history. */
     default AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question, ApiConfig config,
                                     Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
             throws IOException, InterruptedException {
-        return askStream(knowledgeBaseId, expectedRevision, question, List.of(), config, onCitations, onDelta);
+        return askStream(knowledgeBaseId, expectedRevision, question, List.of(), config, onCitations,
+                review -> true, onDelta);
     }
 }

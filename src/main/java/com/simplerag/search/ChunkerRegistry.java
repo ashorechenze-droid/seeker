@@ -9,61 +9,68 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
-/** Selects the existing code-window or prose-paragraph chunking strategy by document type. */
+/** Selects code-window or prose-paragraph chunking while preserving source section locations. */
 public final class ChunkerRegistry {
-    public static final int CHUNKING_VERSION = 1;
+    public static final int CHUNKING_VERSION = 2;
 
     private static final Set<String> CODE_EXTENSIONS = Set.of(
             "java", "kt", "kts", "py", "js", "jsx", "ts", "tsx", "go", "rs", "c", "h",
             "cpp", "hpp", "cs", "php", "rb", "swift", "scala", "sql", "sh", "bash", "ps1",
-            "bat", "cmd", "html", "css", "scss", "vue", "svelte"
-    );
+            "bat", "cmd", "css", "scss", "vue", "svelte");
 
-    public List<DocumentChunk> chunk(DocumentReaderRegistry.ReadDocument document) {
-        return CODE_EXTENSIONS.contains(document.extension())
-                ? chunkByWindow(document, 36, 8) : chunkByParagraph(document);
-    }
-
-    private static List<DocumentChunk> chunkByWindow(DocumentReaderRegistry.ReadDocument document,
-                                                       int window, int overlap) {
+    public List<DocumentChunk> chunk(ReadDocument document) {
         List<DocumentChunk> chunks = new ArrayList<>();
-        for (int start = 0; start < document.lines().size(); start += window - overlap) {
-            int end = Math.min(document.lines().size(), start + window);
-            addChunk(chunks, document, start, end);
-            if (end == document.lines().size()) break;
+        for (DocumentSection section : document.sections()) {
+            if (CODE_EXTENSIONS.contains(document.extension())) {
+                chunkByWindow(chunks, document, section, 36, 8);
+            } else {
+                chunkByParagraph(chunks, document, section);
+            }
         }
-        return chunks;
+        return List.copyOf(chunks);
     }
 
-    private static List<DocumentChunk> chunkByParagraph(DocumentReaderRegistry.ReadDocument document) {
-        List<DocumentChunk> chunks = new ArrayList<>();
+    private static void chunkByWindow(List<DocumentChunk> chunks, ReadDocument document,
+                                      DocumentSection section, int window, int overlap) {
+        for (int start = 0; start < section.units().size(); start += window - overlap) {
+            int end = Math.min(section.units().size(), start + window);
+            addChunk(chunks, document, section, start, end);
+            if (end == section.units().size()) break;
+        }
+    }
+
+    private static void chunkByParagraph(List<DocumentChunk> chunks, ReadDocument document,
+                                         DocumentSection section) {
         int start = 0;
         int characters = 0;
-        for (int i = 0; i < document.lines().size(); i++) {
-            characters += document.lines().get(i).length() + 1;
-            boolean boundary = document.lines().get(i).isBlank() && characters >= 280;
+        for (int index = 0; index < section.units().size(); index++) {
+            characters += section.units().get(index).text().length() + 1;
+            boolean boundary = section.units().get(index).text().isBlank() && characters >= 280;
             boolean full = characters >= 1400;
             if (boundary || full) {
-                addChunk(chunks, document, start, i + 1);
-                start = i + 1;
+                addChunk(chunks, document, section, start, index + 1);
+                start = index + 1;
                 characters = 0;
             }
         }
-        if (start < document.lines().size()) addChunk(chunks, document, start, document.lines().size());
-        return chunks;
+        if (start < section.units().size()) addChunk(chunks, document, section, start, section.units().size());
     }
 
-    private static void addChunk(List<DocumentChunk> chunks, DocumentReaderRegistry.ReadDocument document,
+    private static void addChunk(List<DocumentChunk> chunks, ReadDocument document, DocumentSection section,
                                  int start, int end) {
-        while (start < end && document.lines().get(start).isBlank()) start++;
-        while (end > start && document.lines().get(end - 1).isBlank()) end--;
+        while (start < end && section.units().get(start).text().isBlank()) start++;
+        while (end > start && section.units().get(end - 1).text().isBlank()) end--;
         if (start >= end) return;
-        String content = String.join("\n", document.lines().subList(start, end)).strip();
+        String content = String.join("\n", section.units().subList(start, end).stream()
+                .map(DocumentTextUnit::text).toList()).strip();
         if (content.length() < 12) return;
-        String id = sha1(document.path() + ":" + (start + 1) + ":" + content);
+        int startUnit = section.units().get(start).number();
+        int endUnit = section.units().get(end - 1).number();
+        String sourceLocation = section.sourceLocation(start, end);
+        String id = sha1(document.documentId() + ":" + section.id() + ":" + sourceLocation + ":" + content);
         chunks.add(new DocumentChunk(id, document.path().toString(), document.root().toString(),
-                document.path().getFileName().toString(), document.extension(), start + 1, end,
-                content, document.modifiedAt(), null));
+                document.path().getFileName().toString(), document.extension(), startUnit, endUnit,
+                sourceLocation, content, document.modifiedAt(), null));
     }
 
     private static String sha1(String value) {

@@ -74,6 +74,25 @@ class IncrementalIndexTest {
     }
 
     @Test
+    void readerVersionChangeOnlyRebuildsFilesOwnedByThatReader() {
+        FileFingerprint text = new FileFingerprint("root", "note.txt", 10, 20, "text-hash");
+        FileFingerprint pdf = new FileFingerprint("root", "guide.pdf", 30, 40, "pdf-hash");
+        List<DocumentIndexEntry> previous = List.of(
+                new DocumentIndexEntry("root", "note.txt", 10, 20, "text-hash",
+                        "plain-text", 1, 2, List.of("text-chunk")),
+                new DocumentIndexEntry("root", "guide.pdf", 30, 40, "pdf-hash",
+                        "pdf-text-layer", 1, 2, List.of("pdf-chunk")));
+
+        IncrementalIndexPlan plan = new IncrementalIndexPlanner().plan(previous, List.of(
+                new IndexableDocument(text, "plain-text", 1),
+                new IndexableDocument(pdf, "pdf-text-layer", 2)), 2, true);
+
+        assertEquals(List.of(pdf), plan.modified());
+        assertEquals(List.of("note.txt"), plan.reused().stream()
+                .map(DocumentIndexEntry::relativePath).toList());
+    }
+
+    @Test
     void plannerClassifiesAddedModifiedDeletedAndReusedByContentIdentity() {
         FileFingerprint reused = new FileFingerprint("root", "reused.txt", 10, 20, "same");
         FileFingerprint oldModified = new FileFingerprint("root", "modified.txt", 12, 30, "old-hash");
@@ -145,6 +164,7 @@ class IncrementalIndexTest {
         assertEquals(expected.extension(), actual.extension());
         assertEquals(expected.startLine(), actual.startLine());
         assertEquals(expected.endLine(), actual.endLine());
+        assertEquals(expected.sourceLocation(), actual.sourceLocation());
         assertEquals(expected.content(), actual.content());
         assertEquals(expected.modifiedAt(), actual.modifiedAt());
         assertArrayEquals(expected.embedding(), actual.embedding());

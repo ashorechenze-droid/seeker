@@ -6,6 +6,8 @@ import com.simplerag.application.dto.DocumentReference;
 import com.simplerag.application.dto.IndexBuildProgress;
 import com.simplerag.application.dto.IndexBuildResult;
 import com.simplerag.application.dto.SearchResultView;
+import com.simplerag.application.dto.RemoteSendReview;
+import com.simplerag.application.diagnostics.DiagnosticReportService;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.KnowledgeStats;
 import com.simplerag.rag.ApiConfig;
@@ -33,6 +35,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Coordinates desktop page workflows while MainFrame only composes and navigates the window. */
 public final class DesktopWorkspaceController {
@@ -46,6 +49,7 @@ public final class DesktopWorkspaceController {
     private final AskPanel askPanel;
     private final SearchPanel searchPanel;
     private final KnowledgePanel knowledgePanel;
+    private final DiagnosticPanel diagnosticPanel;
     private final Timer searchTimer;
     private final Timer statusResetTimer;
     private final Timer freshnessTimer;
@@ -55,7 +59,8 @@ public final class DesktopWorkspaceController {
 
     public DesktopWorkspaceController(KnowledgeController knowledge, SearchController search, AskController ask,
                                       BackgroundTaskCoordinator tasks, DesktopFileGateway files,
-                                      Consumer<KnowledgeBase> activeKnowledgeChanged) {
+                                      Consumer<KnowledgeBase> activeKnowledgeChanged,
+                                      DiagnosticReportService diagnostics) {
         this.knowledge = knowledge;
         this.search = search;
         this.ask = ask;
@@ -68,6 +73,7 @@ public final class DesktopWorkspaceController {
         this.knowledgePanel = new KnowledgePanel(this::createKnowledgeBase, this::editKnowledgeBase,
                 this::deleteKnowledgeBase, this::switchKnowledgeBase, this::chooseSource,
                 this::removeSelectedSource, this::rebuildIndex);
+        this.diagnosticPanel = new DiagnosticPanel(diagnostics);
         this.searchTimer = new Timer(180, event -> performSearch());
         searchTimer.setRepeats(false);
         this.statusResetTimer = new Timer(4000, event -> statusBar.status("就绪"));
@@ -84,6 +90,7 @@ public final class DesktopWorkspaceController {
     public KnowledgePanel knowledgePanel() { return knowledgePanel; }
     public SearchPanel searchPanel() { return searchPanel; }
     public AskPanel askPanel() { return askPanel; }
+    public DiagnosticPanel diagnosticPanel() { return diagnosticPanel; }
     public StatusBar statusBar() { return statusBar; }
     public void focusSearch() { searchPanel.focusQuery(); }
 
@@ -113,7 +120,10 @@ public final class DesktopWorkspaceController {
     private void refreshKnowledgeBases() {
         KnowledgeBase current = knowledge.current();
         knowledgePanel.knowledgeBases(knowledge.knowledgeBases(), current);
-        if (current != null) activeKnowledgeChanged.accept(current);
+        if (current != null) {
+            activeKnowledgeChanged.accept(current);
+            askPanel.localOnly(ask.localOnly(current.id()));
+        }
     }
     private void refreshSourcesAndStats() {
         knowledgePanel.sources(knowledge.sources());
@@ -183,7 +193,9 @@ public final class DesktopWorkspaceController {
                     statusBar.status("正在" + latest.stage() + " " + latest.currentFile().getFileName()
                             + "  ·  " + latest.processed() + "/" + latest.total());
                 }, report -> { refreshSourcesAndStats(); setIndexing(false,
-                        "索引完成：" + report.files() + " 个文件，" + report.chunks() + " 个片段"); performSearch(); },
+                        "索引完成：" + report.files() + " 个文件，" + report.chunks() + " 个片段"
+                                + (report.skipped() == 0 ? "" : "，跳过 " + report.skipped() + " 个"));
+                    showIndexWarnings(report); performSearch(); },
                 failure -> { refreshSourcesAndStats(); setIndexing(false, "索引失败"); showError("无法建立索引", failure); },
                 () -> { refreshSourcesAndStats(); setIndexing(false, "索引结果已因知识库版本变化而丢弃"); });
     }
@@ -216,7 +228,12 @@ public final class DesktopWorkspaceController {
     }
 
     private void saveApiConfig() {
-        try { ask.saveConfig(askPanel.config()); askPanel.apiStatus("API 配置已安全保存到本机", Theme.ACCENT); }
+        try {
+            ask.saveConfig(askPanel.config());
+            KnowledgeBase current = knowledge.current();
+            if (current != null) ask.saveLocalOnly(current.id(), askPanel.localOnly());
+            askPanel.apiStatus("API 配置与知识库发送策略已安全保存", Theme.ACCENT);
+        }
         catch (RuntimeException failure) { showError("无法保存 API 配置", failure); }
     }
     private void fetchModels(JButton button) {
@@ -240,6 +257,7 @@ public final class DesktopWorkspaceController {
         askTask = tasks.<AskResultView, String>submit(identity, knowledge::identity, publish ->
                 ask.ask(identity, question, config,
                         citations -> { if (isCurrentIdentity(identity)) publishCitations(citations); },
+                        this::authorizeRemoteSend,
                         delta -> { if (isCurrentIdentity(identity)) publish.accept(delta); }), chunks -> {
                     for (String chunk : chunks) askPanel.appendAssistantDelta(chunk);
                 }, answer -> {
@@ -256,6 +274,34 @@ public final class DesktopWorkspaceController {
                     askPanel.stopAssistant();
                     flashStatus("问答已停止");
                 });
+    }
+
+    private boolean authorizeRemoteSend(RemoteSendReview review) {
+        AtomicInteger choice = new AtomicInteger(2);
+        Runnable prompt = () -> {
+            StringBuilder scope = new StringBuilder();
+            review.citations().stream().limit(8).forEach(citation -> scope.append("\n• ")
+                    .append(citation.document().fileName()).append(" · ")
+                    .append(citation.document().sourceLocation()));
+            Object[] options = {"仅本次发送", "信任此 Host 并发送", "取消"};
+            choice.set(JOptionPane.showOptionDialog(askPanel,
+                    "即将发送远程 RAG 请求\n\n知识库：" + review.knowledgeBaseName()
+                            + "\nRevision：" + review.sourceRevision()
+                            + "\n目标 Host：" + review.targetHost()
+                            + (review.trustedHost() ? "（已信任）" : "（未信任）")
+                            + "\n片段数量：" + review.chunkCount()
+                            + "\n发送范围（文件与位置）：" + scope,
+                    "确认远程发送", JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE,
+                    null, options, options[review.trustedHost() ? 0 : 2]));
+        };
+        try {
+            if (javax.swing.SwingUtilities.isEventDispatchThread()) prompt.run();
+            else javax.swing.SwingUtilities.invokeAndWait(prompt);
+        } catch (Exception failure) {
+            return false;
+        }
+        if (choice.get() == 1) ask.trustHost(review.targetHost());
+        return choice.get() == 0 || choice.get() == 1;
     }
     private void publishCitations(List<CitationView> citations) {
         javax.swing.SwingUtilities.invokeLater(() -> {
@@ -306,6 +352,18 @@ public final class DesktopWorkspaceController {
     private void openSelectedDirectory() { SearchResultView selected = searchPanel.selected(); if (selected != null) openFile(selected.document().path().getParent()); }
     private void openCitation() { CitationView selected = askPanel.selectedCitation(); if (selected != null) openFile(selected.document().path()); }
     private void openFile(Path path) { try { files.open(path); } catch (IOException failure) { showError("无法打开文件", failure); } }
+    private void showIndexWarnings(IndexBuildResult report) {
+        if (report.warnings().isEmpty()) return;
+        StringBuilder message = new StringBuilder("以下文档未完整进入索引：\n\n");
+        report.warnings().stream().limit(12).forEach(warning -> message.append("• ")
+                .append(warning.path().getFileName()).append(" [").append(warning.readerId()).append("]\n  ")
+                .append(warning.message()).append('\n'));
+        if (report.warnings().size() > 12) {
+            message.append("\n另有 ").append(report.warnings().size() - 12).append(" 条警告。");
+        }
+        JOptionPane.showMessageDialog(statusBar, message.toString(), "索引完成（含警告）",
+                JOptionPane.WARNING_MESSAGE);
+    }
     private void copySelectedChunk() { SearchResultView selected = searchPanel.selected(); if (selected != null) {
         Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(selected.document().content()), null); flashStatus("片段已复制"); } }
     private void scheduleSearch() { searchTimer.restart(); }

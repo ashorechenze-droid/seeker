@@ -358,7 +358,7 @@ IncrementalIndexBuilder
 - `IncrementalIndexTest` 覆盖单文件 embedding、删除清理、版本回退和全量等价；`RuntimeFreshnessTest` 覆盖增量 embedding 失败时保留旧 revision 文件。
 - 完整 `build-and-test.cmd` 验证包含 47 项 JUnit/ArchUnit、真实 ONNX 跨语言检索和模拟 OpenAI JSON/SSE 回归。
 
-## 7. 第四阶段：先建立检索质量基线，再调算法
+## 7. 第四阶段：先建立检索质量基线，再调算法（已完成）
 
 ### 更深一层的优化风险
 
@@ -414,7 +414,15 @@ nDCG@10
 - 关键查询的 Recall/MRR 不低于明确阈值。
 - 性能回退超过预算时构建失败或需要显式批准。
 
-## 8. 第五阶段：文件格式扩展
+### 实施结果与证据
+
+- `examples/evaluation/retrieval-baseline.json` 固定 6 类查询，覆盖中问英、中英混合、代码标识符、精确配置键、跨语言界面描述和敏感内容负例，并在数据集中声明 Recall@5、MRR@10、nDCG@10 最低阈值。
+- `RetrievalEvaluator` 统一计算 Recall@5、MRR@10、nDCG@10、首次/缓存查询延迟、索引耗时和每千 chunks 估算内存；逐查询结果同时检查 `mustNotReturn`。
+- JSON 报告记录 dataset/version、`RankingPolicy.version`、指标、性能数据和逐查询排名，可用于同一数据集的前后对比。
+- `RetrievalEvaluationMain` 位于 bootstrap，遵守 infrastructure 只由组装层创建的边界；`build-and-test.cmd` 在真实 ONNX 回归后运行质量门禁，低于阈值或出现禁止结果即失败。
+- `RetrievalEvaluatorTest` 覆盖指标、禁止结果、版本记录、内存估算、阈值验证和 UTF-8 JSON 报告写入。
+
+## 8. 第五阶段：文件格式扩展（已完成）
 
 ### 实施原则
 
@@ -453,7 +461,19 @@ warnings
 - reader 版本变化会触发对应文件重新索引。
 - 默认构建仍不依赖 OCR 或外部进程。
 
-## 9. 第六阶段：规模与性能
+### 实施结果与证据
+
+- 新增版本化 `DocumentReader` registry；scanner 通过 registry 判断支持格式和输入上限，不再维护扩展名条件分支。
+- PDFBox 读取 PDF 文本层，拒绝加密/需要密码、无文本层、损坏、超过 1000 页或提取文本超过限制的文档；使用 mixed memory/temp-file 模式控制内存峰值。
+- Apache POI 读取 DOCX/PPTX/XLSX，统一配置 OOXML zip bomb 防护；XLSX 使用 SAX/event reader，并限制工作表、行、单元格和文本量。
+- jsoup 提取 HTML main/article 正文，排除 script/style/nav/footer/aside/form，不访问外部资源。
+- `ReadDocument -> DocumentSection -> DocumentTextUnit` 统一 document identity、页/section、source location、reader 版本和 warning；搜索、引用 UI 和远程 RAG prompt 使用相同位置标签。
+- 索引格式升级为 v5，`DocumentIndexEntry` 保存每个文件的 `readerId + readerVersion`；reader 版本变化只重建对应格式。
+- 损坏、过大、无法访问或空文本文档生成结构化 `IndexBuildWarning`，其余文件继续构建；发布仍遵守完整 snapshot、原子移动和 SQLite 条件发布。
+- `DocumentReaderTest` 覆盖 PDF、加密 PDF、DOCX、PPTX、XLSX、HTML 和损坏文档隔离；`DocumentScannerTest` 覆盖大小限制原因；`IncrementalIndexTest` 覆盖按 reader 版本定向重建。
+- 默认构建没有 OCR、LibreOffice 或其他外部进程依赖。
+
+## 9. 第六阶段：规模与性能（已完成）
 
 不要因为“向量数据库更先进”就提前替换当前线性扫描。先用基准确认瓶颈属于搜索、embedding、文件读取还是 UI 渲染。
 
@@ -479,7 +499,17 @@ warnings
 - 性能优化不降低 freshness、发布原子性和检索质量阈值。
 - 新索引格式具备迁移或明确重建策略。
 
-## 10. 第七阶段：安全与可运维性
+### 实施结果与证据
+
+- 保留精确线性扫描，没有在 10 万 chunks 阈值和 profile 证据出现前引入 ANN；索引格式仍为 v5，不新增无 manifest 身份的旁路状态。
+- `IncrementalIndexBuilder` 对 scan、read/chunk、embedding、assemble 和 total 分阶段计时，构建完成诊断事件记录文件数、chunk 数与阶段耗时，便于先确认瓶颈再优化。
+- 新增持久化 `ModelFileSignatureCache`：以规范路径、文件大小、mtime 和 filesystem identity 校验缓存，模型元数据变化即重算 SHA-256；缓存文件使用临时文件和原子移动发布。
+- 新增 `PerformanceBenchmarkMain`，固定记录数据集路径/签名、文件数、Windows/Java/CPU/堆信息、优化前完整 hash 与优化后缓存命中的耗时及签名等价性；`build-and-test.cmd` 在质量门禁后生成报告。
+- 2026-07-12 固定 `examples/knowledge`（SHA-256 `a4281c26...8e18de`）、Windows 11、Java 17.0.8、16 logical processors、约 3.95 GiB max heap：完整 hash 115.5649 ms，缓存命中 23.7596 ms，4.86x，签名完全一致。
+- 同一数据集真实 ONNX 回归：Recall@5 1.000、MRR@10 1.000、nDCG@10 0.988；cold query 9.315 ms、cached query 1.065 ms，未降低质量门槛、freshness 或原子发布保证。
+- `ModelFileSignatureCacheTest` 覆盖稳定缓存和模型文件变化失效；报告写入 `target/performance/performance-report.json`。
+
+## 10. 第七阶段：安全与可运维性（已完成）
 
 ### 安全
 
@@ -509,6 +539,16 @@ UI 增加“诊断信息”入口，展示当前 revision、发布 revision、�
 - 用户能解释“为什么不能问答/为什么降级为词法”。
 - 支持导出不含密钥和正文的诊断报告。
 - 远程发送目标和数据范围在操作前可见。
+
+### 实施结果与证据
+
+- `WindowsCredentialManagerSecretStore` 通过 Windows `CredWriteW/CredReadW` 保存 Generic Credential，SQLite 只保存 credential marker；非 Windows 或原生调用失败时才兼容原应用级 AES-GCM 存量格式，并记录不含密钥的 fallback 事件。
+- `ApiConfig` 仅接受无内嵌 user-info 的 HTTP(S) URL，并提取规范化 host；设置保存受信任 host allowlist。
+- 每次远程问答在 HTTP 前显示知识库名称、revision、目标 host、准确片段数量和文件/位置范围；用户可仅本次允许、信任 host 后允许或取消。确认仍每次显示，allowlist 只改变风险提示。
+- 每个知识库可启用“仅本地 RAG”；`AskUseCase` 在检索/HTTP 边界阻止远程发送并给出明确原因。
+- 新增容量受限的 `InMemoryDiagnosticLog`，覆盖 index build started/completed/failed/cancelled、freshness changed、stale task discarded、vector fallback reason、RAG blocked reason 与 adapter latency/error category；事件只含身份、状态、host、数量、耗时和错误类别。
+- UI 新增“诊断信息”页，展示 current/published revision、index/freshness 状态、manifest 摘要和最近事件；可导出 UTF-8 JSON，报告对象不可访问 API key、conversation、prompt 或 chunk content。
+- `InMemoryDiagnosticLogTest` 验证容量边界与 Bearer/Authorization 脱敏，`ApiConfigSecurityTest` 验证 host 和 URL 边界；ArchUnit 继续保证 Swing 不依赖检索内部对象。
 
 ## 11. 工程论证与课程交付材料
 

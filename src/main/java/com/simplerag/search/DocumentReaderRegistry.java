@@ -1,55 +1,79 @@
 package com.simplerag.search;
 
+import com.simplerag.search.reader.DocxDocumentReader;
+import com.simplerag.search.reader.HtmlDocumentReader;
+import com.simplerag.search.reader.PdfDocumentReader;
+import com.simplerag.search.reader.PlainTextDocumentReader;
+import com.simplerag.search.reader.PptxDocumentReader;
+import com.simplerag.search.reader.XlsxDocumentReader;
+
 import java.io.IOException;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 
-/** Registry boundary for document decoding; currently provides the existing plain-text reader. */
+/** Registry selecting a versioned reader without leaking format branches into scanning or ranking. */
 public final class DocumentReaderRegistry {
-    public static final int READER_VERSION = 1;
+    private final Map<String, DocumentReader> byExtension = new LinkedHashMap<>();
+    private final Map<String, DocumentReader> byFileName = new LinkedHashMap<>();
+
+    public DocumentReaderRegistry() {
+        this(List.of(new PlainTextDocumentReader(), new PdfDocumentReader(), new DocxDocumentReader(),
+                new PptxDocumentReader(), new XlsxDocumentReader(), new HtmlDocumentReader()));
+    }
+
+    public DocumentReaderRegistry(List<DocumentReader> readers) {
+        for (DocumentReader reader : readers) register(reader);
+    }
+
+    private void register(DocumentReader reader) {
+        for (String extension : reader.extensions()) {
+            putUnique(byExtension, extension.toLowerCase(Locale.ROOT), reader);
+        }
+        for (String fileName : reader.fileNames()) {
+            putUnique(byFileName, fileName.toLowerCase(Locale.ROOT), reader);
+        }
+    }
+
+    public boolean canRead(Path path, long size) {
+        return find(path).filter(reader -> size >= 0 && size <= reader.maxFileSizeBytes()).isPresent();
+    }
+
+    public Optional<ReaderDescriptor> descriptor(Path path) {
+        return find(path).map(reader -> new ReaderDescriptor(reader.id(), reader.version(),
+                reader.maxFileSizeBytes()));
+    }
 
     public ReadDocument read(Path file, Path root) throws IOException {
-        String text;
-        try {
-            text = Files.readString(file, StandardCharsets.UTF_8);
-        } catch (CharacterCodingException invalidUtf8) {
-            text = Files.readString(file, Charset.defaultCharset());
+        DocumentReader reader = find(file)
+                .orElseThrow(() -> new DocumentReadException("不支持的文件格式"));
+        long size = Files.size(file);
+        if (size > reader.maxFileSizeBytes()) {
+            throw new DocumentReadException("文件超过 " + reader.id() + " reader 的大小限制");
         }
-        if (text.isBlank() || looksBinary(text)) return null;
-        List<String> lines = Arrays.asList(text.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1));
-        long modified;
-        try {
-            modified = Files.getLastModifiedTime(file).toMillis();
-        } catch (IOException ignored) {
-            modified = 0;
-        }
-        return new ReadDocument(file.toAbsolutePath().normalize(), root, extension(file), lines, modified);
+        return reader.read(file, root);
     }
 
-    private static boolean looksBinary(String value) {
-        int sample = Math.min(value.length(), 2048);
-        int controls = 0;
-        for (int i = 0; i < sample; i++) {
-            char c = value.charAt(i);
-            if (c == 0) return true;
-            if (c < 9 || (c > 13 && c < 32)) controls++;
-        }
-        return sample > 0 && controls > sample / 20;
-    }
-
-    private static String extension(Path path) {
-        String name = path.getFileName().toString();
+    private Optional<DocumentReader> find(Path path) {
+        String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+        DocumentReader exact = byFileName.get(name);
+        if (exact != null) return Optional.of(exact);
         int dot = name.lastIndexOf('.');
-        return dot >= 0 && dot < name.length() - 1 ? name.substring(dot + 1).toLowerCase(Locale.ROOT) : "text";
+        if (dot < 0 || dot == name.length() - 1) return Optional.empty();
+        return Optional.ofNullable(byExtension.get(name.substring(dot + 1)));
     }
 
-    public record ReadDocument(Path path, Path root, String extension, List<String> lines, long modifiedAt) {
-        public ReadDocument { lines = List.copyOf(lines); }
+    private static void putUnique(Map<String, DocumentReader> target, String key, DocumentReader reader) {
+        DocumentReader previous = target.putIfAbsent(key, reader);
+        if (previous != null) {
+            throw new IllegalArgumentException("reader registration conflict for " + key + ": "
+                    + previous.id() + " / " + reader.id());
+        }
     }
+
+    public record ReaderDescriptor(String id, int version, long maxFileSizeBytes) { }
 }

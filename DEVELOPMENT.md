@@ -413,7 +413,8 @@ CourseFeaturesTest: knowledge-base CRUD and RAG API checks passed
 
 ## 14. 当前限制
 
-- 不解析 PDF、图片、扫描件或 Office 二进制文档。
+- PDF 只读取文本层；图片、扫描件和纯图片 PDF 不做 OCR。
+- Office 仅支持 OOXML（DOCX/PPTX/XLSX），不解析旧版 DOC/PPT/XLS 二进制格式、宏或嵌入对象内容。
 - 索引使用内存线性扫描，适合个人规模知识库；大量片段可后续接入 HNSW。
 - 当前 watcher/reconciliation 只监控本机当前活动知识库；切换到其他知识库时会重新加载索引并执行完整身份校验。
 - API Key 尚未接入 Windows Credential Manager。
@@ -472,7 +473,7 @@ SettingsRepository
 
 ### 16.2 完整 snapshot 的增量生成
 
-`IncrementalIndexBuilder` 按当前扫描顺序组装文件：reused 项从上一 snapshot 取回原 chunks 和 embeddings，added/modified 项才经过 reader、chunker 和批量 embedding，deleted 项自然从结果中消失。最终仍生成包含全部当前文件的 v4 snapshot，不原地修改活动索引。
+`IncrementalIndexBuilder` 按当前扫描顺序组装文件：reused 项从上一 snapshot 取回原 chunks 和 embeddings，added/modified 项才经过 reader、chunker 和批量 embedding，deleted 项自然从结果中消失。最终仍生成包含全部当前文件的完整 revision snapshot（当前格式 v5），不原地修改活动索引。
 
 复用的全局前提是 embedding model signature 兼容；每个文件还必须同时匹配内容 hash、大小、mtime、reader version 和 chunking version。任一条件变化都会重新处理必要文件。旧 v1-v3 snapshot 没有文件级 entries，会保守执行一次全量重建。
 
@@ -560,4 +561,182 @@ mvn.cmd -q -Dtest=AskPanelTest,ConversationModulesTest test
 ```
 
 `mvn compile` 与上述测试已通过。完整回归仍建议 `.\build-and-test.cmd`。
+
+## 18. 第四阶段检索质量基线
+
+固定评测集位于 `examples/evaluation/retrieval-baseline.json`。每条 case 包含 `query`、`language`、`expectedDocuments`、`expectedPassages`、`mustNotReturn` 和 `category`；数据集顶层声明 Recall@5、MRR@10、nDCG@10 的最低门槛。新增或修改排名策略时应先保留旧报告，再在完全相同的数据集和模型上生成新报告进行对比。
+
+运行评测：
+
+```powershell
+mvn.cmd -q -DskipTests package
+& "$env:JAVA_HOME\bin\java.exe" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" `
+  com.simplerag.bootstrap.RetrievalEvaluationMain
+```
+
+也可依次传入评测集、知识目录和报告路径。默认报告写入 `target/evaluation/retrieval-report.json`，包含 dataset/version、`RankingPolicy.version`、逐查询返回文档，以及以下聚合指标：
+
+| 指标 | 含义 |
+| --- | --- |
+| Recall@5 | 前 5 个结果覆盖期望文档的比例 |
+| MRR@10 | 首个期望文档在前 10 名中的倒数排名 |
+| nDCG@10 | 同时考虑文档命中和期望 passage 的位置质量 |
+| cold/cached latency | 每条查询首次执行与立即重复执行的平均耗时 |
+| indexing time | 当前知识目录完整索引耗时 |
+| memory/1000 chunks | 根据文本、身份字段和向量尺寸计算的可重复内存估算 |
+
+`build-and-test.cmd` 已把真实 ONNX 评测作为最终门禁。任一质量指标低于数据集阈值，或 `mustNotReturn` 文档进入前 10，进程都会非零退出。性能指标本阶段进入报告但尚不设跨机器硬阈值，避免硬件差异导致误报；排名变更评审必须显式比较性能字段。
+
+`RetrievalEvaluatorTest` 使用无模型、临时知识文件验证指标公式、阈值、禁止结果、policy version 和 JSON 输出；基础设施组装入口放在 `bootstrap`，因此未放宽现有 ArchUnit 依赖规则。
+
+## 19. 第五阶段文件格式扩展
+
+### 19.1 Reader registry 与统一输出
+
+`DocumentReaderRegistry` 现在注册独立的 `DocumentReader` 策略，scanner 不再维护文件扩展名分支。默认 reader：
+
+| readerId | 格式 | 实现 | 输入上限 |
+| --- | --- | --- | --- |
+| `plain-text` | Markdown、文本、配置、源码 | JDK UTF-8/系统编码回退 | 2 MiB |
+| `pdf-text-layer` | PDF 文本层 | PDFBox 2.0.32 | 32 MiB、最多 1000 页、最多 8 MiB 提取文本 |
+| `docx` | DOCX | Apache POI 5.3.0 | 32 MiB、最多 20000 个文本单元、8 MiB 提取文本 |
+| `pptx` | PPTX | Apache POI 5.3.0 | 32 MiB、最多 1000 张幻灯片、8 MiB 提取文本 |
+| `xlsx-streaming` | XLSX | POI SAX/event reader | 32 MiB、256 个工作表、10 万行、100 万单元格、8 MiB 文本 |
+| `html-main-content` | HTML/HTM | jsoup 1.18.3 | 5 MiB、20000 个正文块、8 MiB 提取文本 |
+
+所有 reader 返回统一的 `ReadDocument -> DocumentSection -> DocumentTextUnit`：
+
+```text
+documentId
+path + root + extension
+readerId + readerVersion
+logical section/page
+source-addressable text units
+warnings
+```
+
+`ChunkerRegistry` 只处理统一输出。普通文本继续产生 `L12-24`；PDF 产生 `第 3 页 · L1-18`；DOCX/HTML 产生 `章节：标题 · 段落7-12`；PPTX 产生 `幻灯片 4 · 行1-6`；XLSX 产生 `工作表：Config · 行2-9`。`DocumentReference`、搜索结果、问答引用和远程 RAG prompt 都使用同一个 `sourceLocation`。
+
+### 19.2 增量索引与格式版本
+
+索引格式升级为 v5。`DocumentIndexEntry` 除文件 fingerprint 外还保存每个文件实际使用的 `readerId + readerVersion`。`IncrementalIndexPlanner` 按文件比较 reader 身份：只升级 PDF reader 时只重建 PDF，未变化的纯文本、DOCX 等仍可复用 chunks/embeddings。分块版本升级为 2，以纳入 section 边界和新的 source location 身份。
+
+v4 及更早 snapshot 不会被当作 v5 直接复用；加载后按现有不兼容流程要求重建，避免旧 chunk 缺少页码/section 信息。
+
+### 19.3 失败隔离与资源安全
+
+- 加密/需要密码的 PDF 明确跳过；没有文本层的 PDF 提示未启用 OCR。
+- PDFBox 使用 mixed memory/temp-file 模式，并限制页数和提取文本量。
+- OOXML 统一启用 `ZipSecureFile` inflate ratio、单 entry 展开大小和 XML 文本限制。
+- XLSX 使用 SAX/event 模式，不把完整 workbook materialize 到内存。
+- HTML 只解析本地文件，不访问外部资源；移除 script/style/nav/footer/aside/form，并优先提取 main/article/role=main。
+- 损坏、过大、无法访问或提取为空的文档只产生 `IndexBuildWarning`；其他文件继续构建完整 snapshot。
+- 构建完成后 Swing 显示跳过数量和逐文件原因。警告不会绕过临时文件、原子移动、SQLite 条件发布或 freshness gate。
+
+本阶段仍不启动 OCR、LibreOffice 或其他外部进程。
+
+### 19.4 验证
+
+`DocumentReaderTest` 运行时生成 PDF、加密 PDF、DOCX、PPTX、XLSX 和 HTML fixture，验证文本提取与页码/section 定位；同时验证损坏 PDF 只被跳过且健康文档仍进入 snapshot。`DocumentScannerTest` 覆盖 reader 大小上限的结构化警告，`IncrementalIndexTest` 覆盖单个 reader 版本变化只重建对应格式。
+
+快速回归：
+
+```powershell
+mvn.cmd -q test
+```
+
+完整验证仍使用：
+
+```powershell
+.\build-and-test.cmd
+```
+
+## 20. 第六阶段规模与性能
+
+### 20.1 先测量再选择索引结构
+
+本阶段没有引入 HNSW。当前固定课程数据集远低于约 10 万 chunks，真实 ONNX 质量回归的 cold query 为 9.315 ms、cached query 为 1.065 ms，尚无证据表明线性扫描是主要瓶颈。继续使用精确扫描也避免了 ANN recall 损失、额外文件身份和发布一致性问题；未来只有在固定大数据集 profile 证明内存扫描占主导时，才评估与同一 `IndexManifest + revision` 绑定的 ANN 文件。
+
+`IncrementalIndexBuilder` 的 `IndexReport.stageMillis` 记录：
+
+```text
+scan
+readAndChunk
+embedding
+assemble
+total
+```
+
+发布完成的诊断事件同时记录 files、chunks 和这些阶段耗时。该数据不会改变构建流程：增量复用、完整 snapshot、临时文件、原子移动、SQLite 条件发布和 freshness gate 保持原样。
+
+### 20.2 模型签名缓存
+
+旧路径在进程启动后的首次 `embeddingProvider.signature()` 会完整读取 ONNX 与 tokenizer 并计算 SHA-256。`ModelFileSignatureCache` 现在把每个文件的规范路径、size、mtime、filesystem identity 和 SHA-256 写入 `%USERPROFILE%\.simplerag\cache\model-signatures.json`。元数据任一变化就重新读取完整文件；缓存 JSON 损坏时也直接重算，不把不可解析内容当作可信签名。缓存更新使用同目录临时文件和原子移动。
+
+`PerformanceBenchmarkMain` 固定记录 dataset path/signature、文件数、OS、Java、logical processors、max heap，以及 legacy full hash 和 steady-state cache hit。默认输出 `target/performance/performance-report.json`。
+
+2026-07-12 实测：
+
+| 项目 | 值 |
+| --- | --- |
+| 数据集 | `examples/knowledge`，5 files，SHA-256 `a4281c26b86537f6b3e51e1beef8fad134fa04698ce9ab8eb3d06546b58e18de` |
+| 硬件/JVM | Windows 11 10.0，Java 17.0.8，16 logical processors，max heap 4,242,538,496 bytes |
+| 优化前 | 115.5649 ms |
+| 优化后 | 23.7596 ms |
+| 加速比 | 4.864x |
+| 正确性 | `signatureEquivalent=true` |
+
+同轮真实 ONNX 质量报告：Recall@5 1.000、MRR@10 1.000、nDCG@10 0.988，禁止结果未进入前 10。`ModelFileSignatureCacheTest` 覆盖缓存命中和文件变化失效。
+
+## 21. 第七阶段安全与可运维性
+
+### 21.1 凭据与远程发送边界
+
+`WindowsCredentialManagerSecretStore` 使用 JNA 调用 Windows `CredWriteW/CredReadW/CredDeleteW`，把 API Key 保存为当前 Windows 用户的 Generic Credential `SimpleRAG/API`。SQLite `api.encrypted_key` 对新保存值只持有 `wincred:v1:SimpleRAG/API` marker。已有 AES-GCM ciphertext 仍可读取；非 Windows 或 Credential Manager 调用失败时才使用 `SecretCodec` fallback，并只记录 backend 类型，不记录 key 或错误参数。
+
+`ApiConfig` 拒绝非 HTTP(S)、缺少 host 或带 `user:password@host` 的 URL。规范 host（含显式端口）用于 allowlist 和发送确认，不记录完整 URL path/query。
+
+远程问答顺序为：
+
+```text
+identity/READY gate
+  -> local-only policy gate
+  -> current-turn retrieval
+  -> citations published to UI
+  -> freshness gate
+  -> RemoteSendReview
+  -> blocking user authorization on EDT
+  -> ChatRequest / HTTP
+```
+
+`RemoteSendReview` 只包含 knowledge-base identity/name、revision、host、trusted 标志和本轮 citation views。确认框显示准确 chunk 数与文件/sourceLocation，可选择仅本次、信任 host 并发送、取消。即使 host 已信任，每一轮仍显示确认；信任只改变风险标记。每知识库策略 `rag.local_only.<knowledgeBaseId>` 在 `AskUseCase` 内执行，UI checkbox 不是唯一防线。
+
+### 21.2 本地诊断事件与导出
+
+`InMemoryDiagnosticLog` 是容量 300 的进程内 ring buffer。已接入事件：
+
+- index build started/completed/failed/cancelled；
+- freshness changed；
+- stale task discarded；
+- vector fallback reason；
+- RAG blocked reason；
+- remote adapter latency、host、operation 与 error category；
+- credential backend/fallback 状态。
+
+事件属性只允许身份、revision、状态、host、计数、耗时、阶段和异常类别。`DiagnosticEvent` 对 Bearer、Authorization 和 API Key 形态做二次脱敏并限制 message 长度。OpenAI adapter 不记录 request body、prompt、response body、citation text 或 key。
+
+`DiagnosticReportService` 位于 application 层，读取 `ActiveKnowledgeRuntime` 和 `DiagnosticLog`，生成 schema v1 JSON：当前/发布 revision、index/freshness 状态、最后核对时间、manifest 摘要、Java/OS 和事件。Swing 只展示服务返回的 JSON，不依赖 `IndexHandle`/`SemanticSearchEngine`，因此现有 ArchUnit 边界仍成立。导出使用 `Files.writeString(..., UTF_8)`。
+
+### 21.3 验证
+
+```powershell
+mvn.cmd -q test
+mvn.cmd -q package
+& "$env:JAVA_HOME\bin\java.exe" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" `
+  com.simplerag.bootstrap.PerformanceBenchmarkMain
+& "$env:JAVA_HOME\bin\java.exe" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" `
+  com.simplerag.bootstrap.RetrievalEvaluationMain
+```
+
+JUnit/ArchUnit 共 61 项通过；真实 ONNX 质量门禁通过。`InMemoryDiagnosticLogTest` 验证容量与敏感 header 脱敏，`ApiConfigSecurityTest` 验证 host/URL 边界，`ArchitectureTest` 证明新增诊断 UI 未穿透检索内部对象。
 

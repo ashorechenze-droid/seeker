@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.simplerag.model.RagAnswer;
 import com.simplerag.model.RagCitation;
+import com.simplerag.application.diagnostics.DiagnosticSink;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.Map;
 
 /**
  * OpenAI-compatible chat adapter. Converts {@link ChatRequest} into provider messages only;
@@ -33,18 +35,31 @@ import java.util.function.Consumer;
 public final class OpenAiCompatibleClient implements com.simplerag.application.port.out.ChatModel {
     private final HttpClient httpClient;
     private final ObjectMapper json;
+    private final DiagnosticSink diagnostics;
 
     public OpenAiCompatibleClient() {
-        this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build(), new ObjectMapper());
+        this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build(), new ObjectMapper(),
+                DiagnosticSink.noop());
     }
 
     OpenAiCompatibleClient(HttpClient httpClient, ObjectMapper json) {
+        this(httpClient, json, DiagnosticSink.noop());
+    }
+
+    public OpenAiCompatibleClient(DiagnosticSink diagnostics) {
+        this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build(), new ObjectMapper(), diagnostics);
+    }
+
+    OpenAiCompatibleClient(HttpClient httpClient, ObjectMapper json, DiagnosticSink diagnostics) {
         this.httpClient = httpClient;
         this.json = json;
+        this.diagnostics = diagnostics == null ? DiagnosticSink.noop() : diagnostics;
     }
 
     @Override
     public List<String> listModels(ApiConfig config) throws IOException, InterruptedException {
+        long started = System.nanoTime();
+        try {
         config.validateForModels();
         HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "models"))
                 .GET().build();
@@ -63,11 +78,18 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
             }
         }
         models.sort(Comparator.naturalOrder());
+        recordLatency("models", config, started, "ok");
         return List.copyOf(models);
+        } catch (IOException | InterruptedException | RuntimeException failure) {
+            recordLatency("models", config, started, failure.getClass().getSimpleName());
+            throw failure;
+        }
     }
 
     @Override
     public RagAnswer answer(ApiConfig config, ChatRequest chatRequest) throws IOException, InterruptedException {
+        long started = System.nanoTime();
+        try {
         validateAnswerInput(config, chatRequest);
         ObjectNode payload = chatPayload(config, chatRequest, false);
         HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "chat/completions"))
@@ -76,7 +98,13 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
         JsonNode content = response.path("choices").path(0).path("message").path("content");
         String answer = content.isTextual() ? content.asText() : flattenContent(content);
         if (answer.isBlank()) throw new IOException("API 返回了空答案");
-        return new RagAnswer(answer.strip(), List.copyOf(chatRequest.citations()), config.model());
+        RagAnswer result = new RagAnswer(answer.strip(), List.copyOf(chatRequest.citations()), config.model());
+        recordLatency("chat", config, started, "ok");
+        return result;
+        } catch (IOException | InterruptedException | RuntimeException failure) {
+            recordLatency("chat", config, started, failure.getClass().getSimpleName());
+            throw failure;
+        }
     }
 
     /**
@@ -87,6 +115,8 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
     @Override
     public RagAnswer answerStream(ApiConfig config, ChatRequest chatRequest, Consumer<String> onDelta)
             throws IOException, InterruptedException {
+        long started = System.nanoTime();
+        try {
         validateAnswerInput(config, chatRequest);
         ObjectNode payload = chatPayload(config, chatRequest, true);
         HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "chat/completions"))
@@ -96,7 +126,9 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
         HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             response.body().close();
-            return answer(config, chatRequest);
+            RagAnswer fallback = answer(config, chatRequest);
+            recordLatency("chat-stream-fallback", config, started, "ok");
+            return fallback;
         }
         StringBuilder full = new StringBuilder();
         boolean streamed = false;
@@ -123,7 +155,21 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
             return answer(config, chatRequest);
         }
         if (full.toString().isBlank()) throw new IOException("API 返回了空答案");
-        return new RagAnswer(full.toString().strip(), List.copyOf(chatRequest.citations()), config.model());
+        RagAnswer result = new RagAnswer(full.toString().strip(), List.copyOf(chatRequest.citations()), config.model());
+        recordLatency("chat-stream", config, started, "ok");
+        return result;
+        } catch (IOException | InterruptedException | RuntimeException failure) {
+            recordLatency("chat-stream", config, started, failure.getClass().getSimpleName());
+            throw failure;
+        }
+    }
+
+    private void recordLatency(String operation, ApiConfig config, long started, String outcome) {
+        String host;
+        try { host = config.targetHost(); } catch (RuntimeException invalid) { host = "invalid"; }
+        diagnostics.record("adapter latency", "remote-api", operation,
+                Map.of("host", host, "outcome", outcome,
+                        "latencyMs", Long.toString((System.nanoTime() - started) / 1_000_000L)));
     }
 
     private void validateAnswerInput(ApiConfig config, ChatRequest chatRequest) {
@@ -217,7 +263,7 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
         int budget = 14_000;
         for (RagCitation citation : citations) {
             String block = "\n[" + citation.number() + "] 文件：" + citation.chunk().path()
-                    + "，行 " + citation.chunk().startLine() + "-" + citation.chunk().endLine()
+                    + "，位置 " + citation.chunk().sourceLocation()
                     + "\n" + citation.chunk().content() + "\n";
             if (prompt.length() + block.length() > budget) break;
             prompt.append(block);

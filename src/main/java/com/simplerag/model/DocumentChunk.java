@@ -13,12 +13,24 @@ public record DocumentChunk(
         String extension,
         int startLine,
         int endLine,
+        String sourceLocation,
         String content,
         long modifiedAt,
         float[] embedding
 ) implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
+
+    public DocumentChunk {
+        sourceLocation = sourceLocation == null || sourceLocation.isBlank()
+                ? "L" + startLine + "-" + endLine : sourceLocation;
+    }
+
+    public DocumentChunk(String id, String path, String root, String fileName, String extension,
+                         int startLine, int endLine, String content, long modifiedAt, float[] embedding) {
+        this(id, path, root, fileName, extension, startLine, endLine,
+                "L" + startLine + "-" + endLine, content, modifiedAt, embedding);
+    }
 
     public Path filePath() {
         return Path.of(path);
@@ -30,7 +42,7 @@ public record DocumentChunk(
 
     public DocumentChunk withEmbedding(float[] value) {
         return new DocumentChunk(id, path, root, fileName, extension, startLine, endLine,
-                content, modifiedAt, value == null ? null : value.clone());
+                sourceLocation, content, modifiedAt, value == null ? null : value.clone());
     }
 
     public boolean hasEmbedding() {

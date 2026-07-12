@@ -13,4 +13,10 @@ if errorlevel 1 exit /b 1
 
 "%JAVA_LAUNCHER%" -ea -cp "target\test-classes;target\SimpleRAG-1.0-SNAPSHOT.jar" com.simplerag.service.CourseFeaturesTest
 if errorlevel 1 exit /b 1
+
+"%JAVA_LAUNCHER%" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" com.simplerag.bootstrap.RetrievalEvaluationMain
+if errorlevel 1 exit /b 1
+
+"%JAVA_LAUNCHER%" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" com.simplerag.bootstrap.PerformanceBenchmarkMain
+if errorlevel 1 exit /b 1
 endlocal

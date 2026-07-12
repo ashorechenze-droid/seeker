@@ -19,6 +19,7 @@ class DocumentScannerTest {
         Files.writeString(root.resolve("notes.md"), "included");
         Files.writeString(root.resolve("README"), "included without extension");
         Files.writeString(root.resolve("photo.png"), "ignored");
+        Files.write(root.resolve("too-large.txt"), new byte[2 * 1024 * 1024 + 1]);
         Path ignored = Files.createDirectories(root.resolve("node_modules"));
         Files.writeString(ignored.resolve("hidden.md"), "ignored directory");
 
@@ -27,5 +28,7 @@ class DocumentScannerTest {
         assertEquals(List.of(root.toAbsolutePath().normalize()), result.roots());
         assertEquals(2, result.documents().size());
         assertTrue(result.documents().stream().allMatch(item -> item.root().equals(root.toAbsolutePath().normalize())));
+        assertEquals(1, result.warnings().size());
+        assertTrue(result.warnings().get(0).message().contains("大小限制"));
     }
 }

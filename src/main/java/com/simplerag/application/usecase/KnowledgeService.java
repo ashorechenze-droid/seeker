@@ -7,6 +7,7 @@ import com.simplerag.application.port.in.ManageKnowledgeBases;
 import com.simplerag.application.port.in.ManageKnowledgeSources;
 import com.simplerag.application.port.in.RebuildKnowledgeIndex;
 import com.simplerag.application.port.in.SearchKnowledge;
+import com.simplerag.application.port.in.RemoteSendAuthorizer;
 import com.simplerag.application.port.out.ChatModel;
 import com.simplerag.application.port.out.IndexRepository;
 import com.simplerag.application.port.out.KnowledgeBaseRepository;
@@ -31,6 +32,9 @@ import com.simplerag.application.dto.CitationView;
 import com.simplerag.application.dto.DocumentReference;
 import com.simplerag.application.dto.IndexBuildProgress;
 import com.simplerag.application.dto.IndexBuildResult;
+import com.simplerag.application.dto.IndexBuildWarningView;
+import com.simplerag.application.dto.RemoteSendReview;
+import com.simplerag.application.diagnostics.DiagnosticSink;
 import com.simplerag.application.dto.SearchResultView;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.KnowledgeBase;
@@ -76,18 +80,27 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     private final FreshnessGate freshnessGate;
     private final java.util.concurrent.atomic.AtomicLong freshnessEpoch = new java.util.concurrent.atomic.AtomicLong();
     private final ActiveKnowledgeRuntime runtime;
+    private final DiagnosticSink diagnostics;
 
     public KnowledgeService(TextEmbedder embeddingProvider, KnowledgeBaseRepository repository,
                             SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
                             IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor) {
         this(embeddingProvider, repository, settings, secretCodec, apiClient, indexRepository,
-                freshnessMonitor, new ActiveKnowledgeRuntime(new IndexLifecycle()));
+                freshnessMonitor, new ActiveKnowledgeRuntime(new IndexLifecycle()), DiagnosticSink.noop());
     }
 
     public KnowledgeService(TextEmbedder embeddingProvider, KnowledgeBaseRepository repository,
                             SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
                             IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor,
                             ActiveKnowledgeRuntime runtime) {
+        this(embeddingProvider, repository, settings, secretCodec, apiClient, indexRepository,
+                freshnessMonitor, runtime, DiagnosticSink.noop());
+    }
+
+    public KnowledgeService(TextEmbedder embeddingProvider, KnowledgeBaseRepository repository,
+                            SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
+                            IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor,
+                            ActiveKnowledgeRuntime runtime, DiagnosticSink diagnostics) {
         this.embeddingProvider = embeddingProvider;
         this.knowledgeBases = repository;
         this.sources = repository;
@@ -100,6 +113,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         this.freshnessMonitor = freshnessMonitor;
         this.freshnessGate = new FreshnessGate(freshnessMonitor);
         this.runtime = runtime;
+        this.diagnostics = diagnostics == null ? DiagnosticSink.noop() : diagnostics;
     }
 
     public synchronized boolean restore() {
@@ -172,7 +186,9 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         SemanticSearchEngine.IndexReport report = rebuild(roots(), progress == null ? null : value ->
                 progress.accept(new IndexBuildProgress(value.processed(), value.total(),
                         value.currentFile(), value.stage())));
-        return new IndexBuildResult(report.files(), report.chunks(), report.skipped());
+        return new IndexBuildResult(report.files(), report.chunks(), report.skipped(), report.warnings().stream()
+                .map(warning -> new IndexBuildWarningView(warning.path(), warning.readerId(),
+                        warning.message(), warning.skipped())).toList());
     }
 
     public SemanticSearchEngine.IndexReport rebuild(List<Path> roots,
@@ -194,7 +210,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                 capturedSourceHash, embeddingProvider.signature());
         startFreshnessMonitoring(buildingTarget, capturedSources, request.sourceSetHash());
         refreshActiveKnowledgeBase();
-        SemanticSearchEngine builder = new SemanticSearchEngine(embeddingProvider);
+        SemanticSearchEngine builder = new SemanticSearchEngine(embeddingProvider, diagnostics);
         try {
             SemanticSearchEngine.IndexReport report = builder.index(request.sources(), previousSnapshot, progress);
             IndexSnapshot raw = builder.snapshot();
@@ -224,12 +240,26 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                 }
             }
             startFreshnessMonitoringAfterPublish(manifest);
+            diagnostics.record("index build completed", "index", "published", java.util.Map.of(
+                    "knowledgeBaseId", request.knowledgeBaseId(),
+                    "revision", Long.toString(request.sourceRevision()),
+                    "files", Integer.toString(report.files()),
+                    "chunks", Integer.toString(report.chunks()),
+                    "stageMillis", report.stageMillis().toString()));
             return report;
         } catch (IOException | RuntimeException failure) {
             if (failure instanceof StaleTaskException || failure instanceof InterruptedIOException) {
                 publications.markIndexDirty(request.knowledgeBaseId(), failure.getMessage());
+                diagnostics.record(failure instanceof InterruptedIOException
+                                ? "index build cancelled" : "stale task discarded",
+                        "index", failure.getClass().getSimpleName(), java.util.Map.of(
+                                "knowledgeBaseId", request.knowledgeBaseId(),
+                                "revision", Long.toString(request.sourceRevision())));
             } else {
                 publications.markIndexBuildFailed(request.knowledgeBaseId(), request.sourceRevision(), failure.getMessage());
+                diagnostics.record("index build failed", "index", failure.getClass().getSimpleName(),
+                        java.util.Map.of("knowledgeBaseId", request.knowledgeBaseId(),
+                                "revision", Long.toString(request.sourceRevision())));
             }
             refreshActiveKnowledgeBaseIf(request.knowledgeBaseId());
             throw failure;
@@ -293,13 +323,18 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     @Override
     public AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question,
                                    List<ChatMessage> history, ApiConfig config,
-                                   Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
+                                   Consumer<List<CitationView>> onCitations, RemoteSendAuthorizer authorizer,
+                                   Consumer<String> onDelta)
             throws IOException, InterruptedException {
         IndexHandle handle = requireReadyHandle(knowledgeBaseId, expectedRevision);
         List<RagCitation> citations = retrieveCitations(handle, question);
         List<CitationView> citationViews = citations.stream().map(KnowledgeService::toView).toList();
         if (onCitations != null) onCitations.accept(citationViews);
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
+        KnowledgeBase knowledgeBase = knowledgeBases.findKnowledgeBase(knowledgeBaseId).orElseThrow();
+        RemoteSendReview review = new RemoteSendReview(knowledgeBaseId, knowledgeBase.name(), expectedRevision,
+                config.targetHost(), false, citationViews);
+        if (authorizer == null || !authorizer.authorize(review)) throw new IllegalStateException("用户取消了远程发送");
         List<ChatMessage> safeHistory = history == null ? List.of() : List.copyOf(history);
         ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
                 question, safeHistory, citations);
@@ -324,6 +359,13 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     public void saveApiConfig(ApiConfig config) {
         apiSettings.saveApiConfig(config);
     }
+
+    @Override public boolean localOnly(String knowledgeBaseId) { return apiSettings.localOnly(knowledgeBaseId); }
+    @Override public void saveLocalOnly(String knowledgeBaseId, boolean localOnly) {
+        apiSettings.saveLocalOnly(knowledgeBaseId, localOnly);
+    }
+    @Override public Set<String> trustedHosts() { return apiSettings.trustedHosts(); }
+    @Override public void trustHost(String host) { apiSettings.trustHost(host); }
 
     public List<Path> roots() {
         requireActive();
@@ -396,7 +438,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
             selected = knowledgeBases.findKnowledgeBase(selected.id()).orElseThrow();
         }
         settings.putSetting(ACTIVE_KB, selected.id());
-        SemanticSearchEngine engine = new SemanticSearchEngine(embeddingProvider);
+        SemanticSearchEngine engine = new SemanticSearchEngine(embeddingProvider, diagnostics);
         try {
             indexRepository.cleanTemporaryFiles(selected.id());
             indexRepository.cleanUnreferenced(selected.id(), selected.publishedIndexRevision());
@@ -609,7 +651,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
 
     private static DocumentReference toView(DocumentChunk chunk) {
         return new DocumentReference(chunk.id(), chunk.filePath(), chunk.fileName(), chunk.extension(),
-                chunk.startLine(), chunk.endLine(), chunk.content(), chunk.hasEmbedding());
+                chunk.startLine(), chunk.endLine(), chunk.sourceLocation(), chunk.content(), chunk.hasEmbedding());
     }
 
 }

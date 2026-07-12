@@ -1,6 +1,7 @@
 package com.simplerag.search;
 
 import com.simplerag.application.port.out.TextEmbedder;
+import com.simplerag.application.diagnostics.DiagnosticSink;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.SearchResult;
 import com.simplerag.model.SemanticHighlight;
@@ -36,6 +37,7 @@ public final class SemanticSearchEngine {
     private final SemanticHighlightService highlightService;
     private final SemanticScorer semanticScorer;
     private final RankingPolicy rankingPolicy;
+    private final DiagnosticSink diagnostics;
     private volatile State state = State.empty();
     private volatile List<String> roots = List.of();
     private volatile long indexedAt;
@@ -48,19 +50,32 @@ public final class SemanticSearchEngine {
 
     public SemanticSearchEngine(TextEmbedder embeddingProvider) {
         this(embeddingProvider, new DocumentScanner(), new DocumentReaderRegistry(), new ChunkerRegistry(),
-                new LexicalFeatureExtractor(), new SemanticScorer(), RankingPolicy.defaultPolicy());
+                new LexicalFeatureExtractor(), new SemanticScorer(), RankingPolicy.defaultPolicy(), DiagnosticSink.noop());
+    }
+
+    public SemanticSearchEngine(TextEmbedder embeddingProvider, DiagnosticSink diagnostics) {
+        this(embeddingProvider, new DocumentScanner(), new DocumentReaderRegistry(), new ChunkerRegistry(),
+                new LexicalFeatureExtractor(), new SemanticScorer(), RankingPolicy.defaultPolicy(), diagnostics);
     }
 
     public SemanticSearchEngine(TextEmbedder embeddingProvider, SemanticScorer semanticScorer,
                                 RankingPolicy rankingPolicy) {
         this(embeddingProvider, new DocumentScanner(), new DocumentReaderRegistry(), new ChunkerRegistry(),
-                new LexicalFeatureExtractor(), semanticScorer, rankingPolicy);
+                new LexicalFeatureExtractor(), semanticScorer, rankingPolicy, DiagnosticSink.noop());
     }
 
     public SemanticSearchEngine(TextEmbedder embeddingProvider, DocumentScanner documentScanner,
                                 DocumentReaderRegistry readerRegistry, ChunkerRegistry chunkerRegistry,
                                 LexicalFeatureExtractor lexicalFeatures, SemanticScorer semanticScorer,
                                 RankingPolicy rankingPolicy) {
+        this(embeddingProvider, documentScanner, readerRegistry, chunkerRegistry, lexicalFeatures,
+                semanticScorer, rankingPolicy, DiagnosticSink.noop());
+    }
+
+    public SemanticSearchEngine(TextEmbedder embeddingProvider, DocumentScanner documentScanner,
+                                DocumentReaderRegistry readerRegistry, ChunkerRegistry chunkerRegistry,
+                                LexicalFeatureExtractor lexicalFeatures, SemanticScorer semanticScorer,
+                                RankingPolicy rankingPolicy, DiagnosticSink diagnostics) {
         this.embeddingProvider = embeddingProvider;
         this.documentScanner = documentScanner;
         this.readerRegistry = readerRegistry;
@@ -71,6 +86,7 @@ public final class SemanticSearchEngine {
         this.highlightService = new SemanticHighlightService(embeddingProvider, semanticScorer);
         this.semanticScorer = semanticScorer;
         this.rankingPolicy = rankingPolicy;
+        this.diagnostics = diagnostics == null ? DiagnosticSink.noop() : diagnostics;
     }
 
     public IndexReport index(List<Path> sourceRoots, Consumer<IndexProgress> progress) throws IOException {
@@ -109,8 +125,10 @@ public final class SemanticSearchEngine {
                 if (!semanticScorer.queryCompatible(semanticQuery,
                         current.chunks.stream().map(item -> item.chunk).toList())) semanticQuery = null;
                 embeddingsActive = semanticQuery != null;
-            } catch (IOException ignored) {
+            } catch (IOException failure) {
                 embeddingsActive = false;
+                diagnostics.record("vector fallback reason", "retrieval", failure.getClass().getSimpleName(),
+                        Map.of("reason", failure.getMessage() == null ? "embedding failed" : failure.getMessage()));
             }
         }
 
@@ -188,6 +206,10 @@ public final class SemanticSearchEngine {
         return semanticCompatible && embeddingsActive && state.hasEmbeddings;
     }
 
+    public int rankingPolicyVersion() {
+        return rankingPolicy.version();
+    }
+
     public void markStale() {
         semanticCompatible = false;
         embeddingsActive = false;
@@ -233,7 +255,20 @@ public final class SemanticSearchEngine {
     public record IndexProgress(int processed, int total, Path currentFile, String stage) {
     }
 
-    public record IndexReport(int files, int chunks, int skipped) {
+    public record IndexReport(int files, int chunks, int skipped, List<IndexBuildWarning> warnings,
+                              Map<String, Long> stageMillis) {
+        public IndexReport {
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+            stageMillis = stageMillis == null ? Map.of() : Map.copyOf(stageMillis);
+        }
+
+        public IndexReport(int files, int chunks, int skipped, List<IndexBuildWarning> warnings) {
+            this(files, chunks, skipped, warnings, Map.of());
+        }
+
+        public IndexReport(int files, int chunks, int skipped) {
+            this(files, chunks, skipped, List.of(), Map.of());
+        }
     }
 
     private record IndexedChunk(DocumentChunk chunk, Map<String, Double> tokens,

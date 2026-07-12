@@ -41,7 +41,8 @@ public final class SearchUseCase implements SearchKnowledge {
     private static SearchResultView toView(SearchResult result) {
         DocumentChunk chunk = result.chunk();
         DocumentReference document = new DocumentReference(chunk.id(), chunk.filePath(), chunk.fileName(),
-                chunk.extension(), chunk.startLine(), chunk.endLine(), chunk.content(), chunk.hasEmbedding());
+                chunk.extension(), chunk.startLine(), chunk.endLine(), chunk.sourceLocation(),
+                chunk.content(), chunk.hasEmbedding());
         return new SearchResultView(document, result.score(), result.reason());
     }
 }

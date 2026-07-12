@@ -59,7 +59,9 @@ mvn.cmd -q package
 knowledgeBaseId + sourceRevision + sourceSetHash + embeddingModelSignature
 ```
 
-扫描、分块和向量化在独立 builder 中完成，不直接修改当前已发布索引。索引格式 v4 为每个文件保存相对路径、大小、修改时间、SHA-256、reader/chunker 版本和 chunk IDs。重建时会读取上一已发布 snapshot：未变化文件直接复用 chunks 和 embeddings，只读取、分块并向量化新增或修改文件；删除文件的 chunks 不会进入新 snapshot。模型、reader 或 chunker 版本不兼容时会自动扩大重建范围。
+扫描、分块和向量化在独立 builder 中完成，不直接修改当前已发布索引。索引格式 v5 为每个文件保存相对路径、大小、修改时间、SHA-256、实际 `readerId + readerVersion`、chunker 版本和 chunk IDs。重建时会读取上一已发布 snapshot：未变化文件直接复用 chunks 和 embeddings，只读取、分块并向量化新增或修改文件；删除文件的 chunks 不会进入新 snapshot。模型或 chunker 不兼容时会扩大重建范围；单个 reader 版本变化时只重建该 reader 负责的格式。
+
+损坏、加密、过大、无法访问或没有可提取文本的文档只会被跳过并记录逐文件原因，其他文档仍继续生成完整 snapshot。完成后界面显示跳过数量和 reader 警告；这些警告不会改变原子发布和 freshness 规则。
 
 增量构建仍生成完整的新 revision snapshot。如果当前 revision 已经发布（例如用户主动重建 `READY` 索引或模型版本变化），开始构建时会先分配新的 revision，避免覆盖数据库仍引用的文件。构建完成后先写入：
 
@@ -79,7 +81,7 @@ knowledgeBaseId + sourceRevision + sourceSetHash + embeddingModelSignature
 
 ### 3. 语义检索
 
-在“语义检索”页输入中文、英文、代码标识符或自然语言问题，可按扩展名过滤结果。结果保留绝对路径和原始行号。
+在“语义检索”页输入中文、英文、代码标识符或自然语言问题，可按扩展名过滤结果。结果保留绝对路径和统一来源位置：文本/源码显示行号，PDF 显示页码，DOCX/HTML 显示逻辑章节，PPTX 显示幻灯片，XLSX 显示工作表与行号。
 
 - 黄色：原词命中。
 - 绿色：二阶段向量定位得到的语义相关句子或代码段。
@@ -111,7 +113,7 @@ GET  <baseUrl>/models
 POST <baseUrl>/chat/completions
 ```
 
-问答时最多召回 6 个片段，发送问题、片段路径、行号和内容，并要求模型用 `[1]`、`[2]` 标注引用。回答支持 SSE 流式显示和随时停止；服务不支持 SSE 时自动回退到非流式响应。
+问答时最多召回 6 个片段，发送问题、片段路径、页码/章节/行号等来源位置和内容，并要求模型用 `[1]`、`[2]` 标注引用。回答支持 SSE 流式显示和随时停止；服务不支持 SSE 时自动回退到非流式响应。
 
 知识问答页采用聊天气泡 UI（用户右对齐 / 助手左对齐），支持多轮追问：
 
@@ -127,9 +129,27 @@ POST <baseUrl>/chat/completions
 安全边界：
 
 - 本地检索不会上传文档。
-- 远程 RAG 会把召回片段发送到用户填写的 API URL，不会发送整个知识库。
+- API URL 必须是无内嵌账号密码的 HTTP(S) 地址。远程 RAG 不会发送整个知识库。
+- 每次 HTTP 请求前都会显示知识库、revision、目标 host、准确片段数量和文件/页码/章节/行号范围；可仅本次允许、信任 host 后允许或取消。
+- 每个知识库可勾选“仅本地 RAG”，该策略在 application use case 内阻止所有远程问答。
 - 敏感资料应使用本地兼容模型服务。
-- API Key 用当前本机用户派生的 AES-GCM 密钥加密后存入 SQLite，但不等同于 Windows Credential Manager。
+- Windows 上 API Key 首选保存为当前用户的 Windows Credential Manager Generic Credential，SQLite 只保存 marker；原 AES-GCM 格式仅用于存量兼容或 Credential Manager 不可用时的 fallback。
+
+## 诊断与性能报告
+
+顶部“诊断信息”页显示当前/发布 revision、索引状态、freshness 状态和最近核对时间、manifest 摘要，以及最近的构建、降级、阻止和 adapter 延迟事件。可导出 UTF-8 JSON；报告不读取或输出 API Key、完整 prompt、对话历史或 chunk 正文。
+
+索引构建记录 scan、read/chunk、embedding、assemble 和 total 分阶段耗时。模型文件 SHA-256 使用持久化签名缓存，文件规范路径、大小、mtime 或 filesystem identity 变化时自动失效，缓存通过临时文件和原子移动更新。
+
+单独生成固定数据集/硬件性能报告：
+
+```powershell
+mvn.cmd -q -DskipTests package
+& "$env:JAVA_HOME\bin\java.exe" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" `
+  com.simplerag.bootstrap.PerformanceBenchmarkMain
+```
+
+报告写入 `target/performance/performance-report.json`。2026-07-12 在 Windows 11、Java 17.0.8、16 logical processors、固定 `examples/knowledge` 数据集上，模型签名完整 hash 为 115.5649 ms，缓存命中为 23.7596 ms（4.86x），且签名等价。
 
 ## 索引状态
 
@@ -149,12 +169,15 @@ watcher 只负责使旧索引失效，不会直接修改或发布索引。用户
 ## 支持的内容
 
 - Markdown、纯文本、配置文件和常见编程语言源码。
+- PDF 文本层（PDFBox，不做 OCR）。
+- DOCX、PPTX、XLSX（Apache POI；XLSX 使用流式 SAX reader）。
+- HTML/HTM 正文（jsoup，优先 main/article 并排除脚本和导航噪声）。
 - 代码重叠窗口分块与文档自然段分块。
 - camelCase、snake_case、中文 n-gram、TF-IDF 和少量概念归一。
 - 384 维多语言句向量、混合排序和句子级语义定位。
 - 自动跳过 `.git`、`node_modules`、`target`、`build`、虚拟环境等目录。
 
-单个文件最大读取 2 MB。当前不解析 PDF、图片、扫描件或 Office 二进制文档。
+输入限制按 reader 设置：纯文本 2 MiB、HTML 5 MiB、PDF/OOXML 32 MiB，并另外限制 PDF 页数、Office zip 展开、工作表/行/单元格数量和提取文本量。当前不解析图片、扫描件、纯图片 PDF、旧版 DOC/PPT/XLS、宏或嵌入对象，也不启动 OCR 或外部进程。
 
 ## 数据存储
 
@@ -234,6 +257,10 @@ SQLite output ports 已按知识库、数据源、发布、freshness 和设置�
 - 同会话修改/删除文件、监控关闭时远程请求数为 0，以及构建期间文件变化的竞态测试；
 - 增量 planner 表驱动测试、单文件 embedding 复用、删除清理、模型/reader/chunker 版本回退和全量等价性测试；
 - 增量 embedding 失败后旧 published revision 与旧索引文件保留测试；
+- PDF/HTML/OOXML reader、加密/损坏文档、页码/section 引用、reader 大小限制和按格式版本增量重建测试；
+- 固定查询集上的 Recall@5、MRR@10、nDCG@10 与 `mustNotReturn` 真实 ONNX 质量门禁，并生成包含排名策略版本和性能数据的 JSON 报告；
+- 模型签名缓存前后基准，记录固定数据集签名、硬件/JVM、耗时、加速比和签名等价性；
+- Windows Credential Manager、URL/host 边界、诊断容量与敏感 header 脱敏测试；
 - ArchUnit 三层依赖、Swing DTO 边界、检索流水线和后台任务所有权检查；
 - 原有 `SemanticSearchEngineTest` 真实 ONNX 跨语言检索入口；
 - 原有 `CourseFeaturesTest` SQLite、模拟 OpenAI JSON/SSE 和引用入口。
@@ -245,3 +272,13 @@ mvn.cmd -q test
 ```
 
 完整开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+单独运行检索质量评测（默认读取 `examples/evaluation/retrieval-baseline.json`）：
+
+```powershell
+mvn.cmd -q -DskipTests package
+& "$env:JAVA_HOME\bin\java.exe" -cp "target\SimpleRAG-1.0-SNAPSHOT.jar" `
+  com.simplerag.bootstrap.RetrievalEvaluationMain
+```
+
+报告输出到 `target/evaluation/retrieval-report.json`。当前门槛为 Recall@5 ≥ 0.95、MRR@10 ≥ 0.95、nDCG@10 ≥ 0.90，并要求禁止文档不进入前 10；报告同时记录首次/缓存查询延迟、索引耗时、每千 chunks 内存估算和 `RankingPolicy.version`。

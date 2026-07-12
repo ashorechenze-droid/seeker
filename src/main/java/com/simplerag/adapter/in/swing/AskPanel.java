@@ -10,6 +10,7 @@ import javax.swing.BoxLayout;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
+import javax.swing.JCheckBox;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JPanel;
@@ -55,6 +56,7 @@ public final class AskPanel extends JPanel {
     private final JPasswordField apiKey = new JPasswordField();
     private final JComboBox<String> apiModel = new JComboBox<>();
     private final JLabel apiStatus = new JLabel("API 未连接");
+    private final JCheckBox localOnly = new JCheckBox("仅本地 RAG（禁止远程发送）");
     private final JTextArea question = new JTextArea(3, 30);
     private final JLabel conversationTitle = new JLabel("对话");
     private final JLabel conversationMeta = new JLabel("多轮上下文已启用 · 切换知识库或版本会自动清空");
@@ -116,6 +118,8 @@ public final class AskPanel extends JPanel {
     public void clearQuestion() { question.setText(""); }
     public CitationView selectedCitation() { return citationList.getSelectedValue(); }
     public Object modelEditorValue() { return apiModel.getEditor().getItem(); }
+    public boolean localOnly() { return localOnly.isSelected(); }
+    public void localOnly(boolean value) { localOnly.setSelected(value); }
 
     public void models(List<String> models, Object previous) {
         apiModel.removeAllItems();
@@ -333,12 +337,20 @@ public final class AskPanel extends JPanel {
         panel.add(save, c);
         c.gridy = 1;
         c.gridx = 0;
-        c.gridwidth = 5;
+        c.gridwidth = 3;
         c.insets = new Insets(7, 2, 0, 0);
         c.fill = GridBagConstraints.HORIZONTAL;
         apiStatus.setForeground(Theme.MUTED);
         apiStatus.setFont(Theme.UI_FONT.deriveFont(10f));
         panel.add(apiStatus, c);
+        c.gridx = 3;
+        c.gridwidth = 2;
+        c.fill = GridBagConstraints.NONE;
+        c.anchor = GridBagConstraints.EAST;
+        localOnly.setOpaque(false);
+        localOnly.setForeground(Theme.MUTED);
+        localOnly.setFont(Theme.UI_FONT.deriveFont(10f));
+        panel.add(localOnly, c);
         return panel;
     }
 
@@ -675,7 +687,7 @@ public final class AskPanel extends JPanel {
                     Theme.padding(8, 8, 8, 8)));
             title.setText("[" + value.number() + "] " + value.document().fileName());
             title.setForeground(Theme.TEXT);
-            meta.setText("L" + value.document().startLine() + "-" + value.document().endLine()
+            meta.setText(value.document().sourceLocation()
                     + "  ·  " + Math.round(value.score() * 100) + "%");
             meta.setForeground(Theme.MUTED);
             setToolTipText(value.document().path().toString());

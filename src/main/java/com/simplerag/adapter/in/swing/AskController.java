@@ -7,6 +7,7 @@ import com.simplerag.application.conversation.ConversationSession;
 import com.simplerag.application.conversation.ConversationStore;
 import com.simplerag.application.dto.AskResultView;
 import com.simplerag.application.dto.CitationView;
+import com.simplerag.application.port.in.RemoteSendAuthorizer;
 import com.simplerag.rag.ApiConfig;
 
 import java.io.IOException;
@@ -33,6 +34,9 @@ public final class AskController {
     public List<String> fetchModels(ApiConfig config) throws IOException, InterruptedException {
         return settings.fetchModels(config);
     }
+    public boolean localOnly(String knowledgeBaseId) { return settings.localOnly(knowledgeBaseId); }
+    public void saveLocalOnly(String knowledgeBaseId, boolean value) { settings.saveLocalOnly(knowledgeBaseId, value); }
+    public void trustHost(String host) { settings.trustHost(host); }
 
     public ConversationStore conversations() {
         return conversations;
@@ -52,13 +56,14 @@ public final class AskController {
      * History never includes citation snippets; retrieval always re-runs for the current question.
      */
     public AskResultView ask(KnowledgeController.TaskIdentity identity, String question, ApiConfig config,
-                             Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
+                             Consumer<List<CitationView>> onCitations, RemoteSendAuthorizer authorizer,
+                             Consumer<String> onDelta)
             throws IOException, InterruptedException {
         ConversationSession session = sessionFor(identity);
         // Snapshot history before appending the current user turn so the model sees prior turns only.
         List<ChatMessage> history = session.historyForRequest(false);
         AskResultView result = ask.askStream(identity.knowledgeBaseId(), identity.sourceRevision(),
-                question, history, config, onCitations, onDelta);
+                question, history, config, onCitations, authorizer, onDelta);
         // Only commit turns after success, and only if the store still owns this session object
         // (knowledgeBase/revision must not have changed mid-request).
         ConversationSession live = conversations.openOrReplace(

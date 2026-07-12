@@ -41,26 +41,33 @@ public final class IncrementalIndexBuilder {
 
     public BuildResult build(List<Path> sourceRoots, IndexSnapshot previous,
                              Consumer<SemanticSearchEngine.IndexProgress> progress) throws IOException {
-        DocumentScanner.ScanResult scan = scanner.scan(sourceRoots);
+        long started = System.nanoTime();
+        DocumentScanner.ScanResult scan = scanner.scan(sourceRoots, readers);
+        long scannedAt = System.nanoTime();
         List<FileFingerprint> fingerprints = new ArrayList<>();
+        List<IndexableDocument> currentDocuments = new ArrayList<>();
         Map<String, DocumentScanner.ScannedDocument> documentsByKey = new LinkedHashMap<>();
-        int skipped = 0;
+        List<IndexBuildWarning> warnings = new ArrayList<>(scan.warnings());
+        int skipped = (int) scan.warnings().stream().filter(IndexBuildWarning::skipped).count();
         for (DocumentScanner.ScannedDocument document : scan.documents()) {
             checkInterrupted();
             try {
                 FileFingerprint fingerprint = FileFingerprint.capture(document);
                 fingerprints.add(fingerprint);
+                currentDocuments.add(new IndexableDocument(fingerprint, document.readerId(), document.readerVersion()));
                 documentsByKey.put(fingerprint.key(), document);
             } catch (IOException | RuntimeException unreadable) {
                 skipped++;
+                warnings.add(new IndexBuildWarning(document.path(), document.readerId(),
+                        "无法读取文件元数据：" + message(unreadable), true));
             }
         }
 
         List<DocumentIndexEntry> previousEntries = previous == null
                 ? List.of() : previous.documentEntries();
         boolean reuseCompatible = reuseCompatible(previous);
-        IncrementalIndexPlan plan = planner.plan(previousEntries, fingerprints,
-                DocumentReaderRegistry.READER_VERSION, ChunkerRegistry.CHUNKING_VERSION, reuseCompatible);
+        IncrementalIndexPlan plan = planner.plan(previousEntries, currentDocuments,
+                ChunkerRegistry.CHUNKING_VERSION, reuseCompatible);
         Map<String, DocumentIndexEntry> reusableEntries = new HashMap<>();
         plan.reused().forEach(entry -> reusableEntries.put(entry.key(), entry));
         Map<String, DocumentChunk> previousChunks = new HashMap<>();
@@ -75,14 +82,21 @@ public final class IncrementalIndexBuilder {
             List<DocumentChunk> chunks = reusable == null ? null : reusableChunks(reusable, previousChunks);
             if (chunks == null) {
                 try {
-                    DocumentReaderRegistry.ReadDocument read = readers.read(scanned.path(), scanned.root());
+                    ReadDocument read = readers.read(scanned.path(), scanned.root());
                     chunks = read == null ? List.of() : chunkers.chunk(read);
-                    DocumentIndexEntry entry = DocumentIndexEntry.from(fingerprint,
-                            DocumentReaderRegistry.READER_VERSION, ChunkerRegistry.CHUNKING_VERSION,
+                    IndexableDocument current = new IndexableDocument(fingerprint,
+                            scanned.readerId(), scanned.readerVersion());
+                    DocumentIndexEntry entry = DocumentIndexEntry.from(current, ChunkerRegistry.CHUNKING_VERSION,
                             chunks.stream().map(DocumentChunk::id).toList());
                     files.add(new FileWork(entry, chunks, true));
+                    if (read != null) {
+                        read.warnings().forEach(warning -> warnings.add(new IndexBuildWarning(
+                                scanned.path(), scanned.readerId(), warning, false)));
+                    }
                 } catch (IOException | RuntimeException unreadable) {
                     skipped++;
+                    warnings.add(new IndexBuildWarning(scanned.path(), scanned.readerId(),
+                            message(unreadable), true));
                 }
             } else {
                 files.add(new FileWork(reusable, chunks, false));
@@ -94,7 +108,9 @@ public final class IncrementalIndexBuilder {
             }
         }
 
+        long readAt = System.nanoTime();
         Map<String, DocumentChunk> embeddedNewChunks = embedNewChunks(files, progress);
+        long embeddedAt = System.nanoTime();
         List<DocumentChunk> completeChunks = new ArrayList<>();
         List<DocumentIndexEntry> completeEntries = new ArrayList<>();
         for (FileWork file : files) {
@@ -104,8 +120,16 @@ public final class IncrementalIndexBuilder {
                         ? embeddedNewChunks.getOrDefault(chunk.id(), chunk) : chunk);
             }
         }
+        long completedAt = System.nanoTime();
+        Map<String, Long> timings = Map.of(
+                "scan", millis(started, scannedAt),
+                "readAndChunk", millis(scannedAt, readAt),
+                "embedding", millis(readAt, embeddedAt),
+                "assemble", millis(embeddedAt, completedAt),
+                "total", millis(started, completedAt));
         return new BuildResult(scan.roots().stream().map(Path::toString).toList(), completeChunks,
-                completeEntries, new SemanticSearchEngine.IndexReport(files.size(), completeChunks.size(), skipped), plan);
+                completeEntries, new SemanticSearchEngine.IndexReport(files.size(), completeChunks.size(), skipped,
+                warnings, timings), plan);
     }
 
     private Map<String, DocumentChunk> embedNewChunks(List<FileWork> files,
@@ -162,6 +186,13 @@ public final class IncrementalIndexBuilder {
     private static void checkInterrupted() throws InterruptedIOException {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("索引构建已取消");
     }
+
+    private static String message(Throwable failure) {
+        String value = failure.getMessage();
+        return value == null || value.isBlank() ? failure.getClass().getSimpleName() : value.strip();
+    }
+
+    private static long millis(long from, long to) { return (to - from) / 1_000_000L; }
 
     private record FileWork(DocumentIndexEntry entry, List<DocumentChunk> chunks, boolean requiresEmbedding) { }
 

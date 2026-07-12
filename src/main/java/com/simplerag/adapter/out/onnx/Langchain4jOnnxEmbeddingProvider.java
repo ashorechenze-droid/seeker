@@ -10,7 +10,6 @@ import dev.langchain4j.model.embedding.onnx.PoolingMode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -31,6 +30,7 @@ public final class Langchain4jOnnxEmbeddingProvider implements EmbeddingProvider
 
     private final Path modelPath;
     private final Path tokenizerPath;
+    private final ModelFileSignatureCache signatureCache;
     private volatile OnnxEmbeddingModel model;
     private volatile String status;
     private volatile String fileSignature;
@@ -43,6 +43,8 @@ public final class Langchain4jOnnxEmbeddingProvider implements EmbeddingProvider
         Path directory = modelDirectory.toAbsolutePath().normalize();
         this.modelPath = directory.resolve(MODEL_FILE);
         this.tokenizerPath = directory.resolve(TOKENIZER_FILE);
+        this.signatureCache = new ModelFileSignatureCache(Path.of(System.getProperty("user.home"),
+                ".simplerag", "cache", "model-signatures.json"));
         this.status = isConfigured() ? "模型已就绪" : "未安装语义模型";
     }
 
@@ -116,26 +118,12 @@ public final class Langchain4jOnnxEmbeddingProvider implements EmbeddingProvider
         synchronized (this) {
             if (fileSignature == null) {
                 try {
-                    MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                    updateDigest(digest, modelPath);
-                    updateDigest(digest, tokenizerPath);
-                    fileSignature = java.util.HexFormat.of().formatHex(digest.digest());
+                    fileSignature = signatureCache.signature(List.of(modelPath, tokenizerPath));
                 } catch (Exception failure) {
                     fileSignature = "unavailable";
                 }
             }
             return fileSignature;
-        }
-    }
-
-    private static void updateDigest(MessageDigest digest, Path path) throws IOException {
-        if (!Files.isRegularFile(path)) return;
-        try (var input = Files.newInputStream(path)) {
-            byte[] buffer = new byte[64 * 1024];
-            int read;
-            while ((read = input.read(buffer)) >= 0) {
-                if (read > 0) digest.update(buffer, 0, read);
-            }
         }
     }
 

@@ -13,7 +13,7 @@ public record IndexSnapshot(int version, List<String> roots, List<DocumentChunk>
     @Serial
     private static final long serialVersionUID = 1L;
 
-    public static final int CURRENT_VERSION = 4;
+    public static final int CURRENT_VERSION = 5;
 
     public IndexSnapshot {
         roots = roots == null ? List.of() : List.copyOf(roots);

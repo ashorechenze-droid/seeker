@@ -1,6 +1,7 @@
 package com.simplerag.adapter.in.swing;
 
 import com.simplerag.model.KnowledgeBase;
+import com.simplerag.application.diagnostics.DiagnosticReportService;
 
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
@@ -28,18 +29,21 @@ import java.nio.file.Path;
 public final class MainFrame extends JFrame {
     private static final String SEARCH_MODE = "search";
     private static final String ASK_MODE = "ask";
+    private static final String DIAGNOSTIC_MODE = "diagnostic";
     private final CardLayout modeLayout = new CardLayout();
     private final JPanel modeCards = new JPanel(modeLayout);
     private final JLabel currentKnowledge = new JLabel();
     private final JButton searchMode = new JButton("语义检索");
     private final JButton askMode = new JButton("知识问答");
+    private final JButton diagnosticMode = new JButton("诊断信息");
     private final DesktopWorkspaceController workspace;
 
     public MainFrame(KnowledgeController knowledge, SearchController search, AskController ask,
-                     BackgroundTaskCoordinator tasks, DesktopFileGateway files) {
+                     BackgroundTaskCoordinator tasks, DesktopFileGateway files,
+                     DiagnosticReportService diagnostics) {
         super("SimpleRAG - 本地语义知识库");
         this.workspace = new DesktopWorkspaceController(knowledge, search, ask, tasks, files,
-                this::showCurrentKnowledge);
+                this::showCurrentKnowledge, diagnostics);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setMinimumSize(new Dimension(1120, 680));
         setSize(1440, 860);
@@ -73,7 +77,8 @@ public final class MainFrame extends JFrame {
         JLabel subtitle = new JLabel("LOCAL KNOWLEDGE WORKSPACE"); subtitle.setForeground(Theme.MUTED); subtitle.setFont(Theme.UI_FONT.deriveFont(Font.BOLD, 9f));
         brand.add(title); brand.add(subtitle); brand.setPreferredSize(new Dimension(220, 42));
         JPanel modes = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2)); modes.setOpaque(false);
-        styleModeButton(searchMode); styleModeButton(askMode); modes.add(searchMode); modes.add(askMode);
+        styleModeButton(searchMode); styleModeButton(askMode); styleModeButton(diagnosticMode);
+        modes.add(searchMode); modes.add(askMode); modes.add(diagnosticMode);
         currentKnowledge.setForeground(Theme.MUTED); currentKnowledge.setFont(Theme.UI_FONT.deriveFont(Font.BOLD, 12f));
         currentKnowledge.setBorder(Theme.padding(0, 8, 0, 4));
         header.add(brand, BorderLayout.WEST); header.add(modes, BorderLayout.CENTER); header.add(currentKnowledge, BorderLayout.EAST);
@@ -83,6 +88,7 @@ public final class MainFrame extends JFrame {
     private Component buildBody() {
         modeCards.setOpaque(true); modeCards.setBackground(Theme.BACKGROUND);
         modeCards.add(workspace.searchPanel(), SEARCH_MODE); modeCards.add(workspace.askPanel(), ASK_MODE);
+        modeCards.add(workspace.diagnosticPanel(), DIAGNOSTIC_MODE);
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, workspace.knowledgePanel(), modeCards);
         split.setDividerLocation(270); split.setDividerSize(1); split.setResizeWeight(0); split.setBorder(null); split.setBackground(Theme.BORDER);
         return split;
@@ -91,6 +97,7 @@ public final class MainFrame extends JFrame {
     private void installNavigation() {
         searchMode.addActionListener(event -> showMode(SEARCH_MODE));
         askMode.addActionListener(event -> showMode(ASK_MODE));
+        diagnosticMode.addActionListener(event -> { workspace.diagnosticPanel().refresh(); showMode(DIAGNOSTIC_MODE); });
         getRootPane().getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_K,
                 Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "focusSearch");
         getRootPane().getActionMap().put("focusSearch", new javax.swing.AbstractAction() {
@@ -99,10 +106,11 @@ public final class MainFrame extends JFrame {
     }
 
     private void showMode(String mode) {
-        modeLayout.show(modeCards, mode); boolean search = SEARCH_MODE.equals(mode);
+        modeLayout.show(modeCards, mode); boolean search = SEARCH_MODE.equals(mode); boolean ask = ASK_MODE.equals(mode);
         searchMode.setBackground(search ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
-        askMode.setBackground(search ? Theme.PANEL_ALT : Theme.ACCENT_DARK);
-        searchMode.setForeground(Theme.TEXT); askMode.setForeground(Theme.TEXT);
+        askMode.setBackground(ask ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
+        diagnosticMode.setBackground(DIAGNOSTIC_MODE.equals(mode) ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
+        searchMode.setForeground(Theme.TEXT); askMode.setForeground(Theme.TEXT); diagnosticMode.setForeground(Theme.TEXT);
     }
 
     private void showCurrentKnowledge(KnowledgeBase knowledge) {
