@@ -24,6 +24,8 @@ import com.simplerag.application.freshness.SourceFingerprint;
 import com.simplerag.application.runtime.ActiveKnowledgeContext;
 import com.simplerag.application.runtime.ActiveKnowledgeRuntime;
 import com.simplerag.application.runtime.IndexLifecycle;
+import com.simplerag.application.conversation.ChatMessage;
+import com.simplerag.application.conversation.ChatRequest;
 import com.simplerag.application.dto.AskResultView;
 import com.simplerag.application.dto.CitationView;
 import com.simplerag.application.dto.DocumentReference;
@@ -267,7 +269,9 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         IndexHandle handle = requireReadyHandle();
         List<RagCitation> citations = retrieveCitations(handle, question);
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
-        return apiClient.answer(config, question, citations);
+        ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
+                question, List.of(), citations);
+        return apiClient.answer(config, request);
     }
 
     /**
@@ -281,21 +285,27 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         List<RagCitation> citations = retrieveCitations(handle, question);
         if (onCitations != null) onCitations.accept(citations);
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
-        return apiClient.answerStream(config, question, citations, onDelta);
+        ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
+                question, List.of(), citations);
+        return apiClient.answerStream(config, request, onDelta);
     }
 
-    public AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question, ApiConfig config,
-                               Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
+    @Override
+    public AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question,
+                                   List<ChatMessage> history, ApiConfig config,
+                                   Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
             throws IOException, InterruptedException {
         IndexHandle handle = requireReadyHandle(knowledgeBaseId, expectedRevision);
         List<RagCitation> citations = retrieveCitations(handle, question);
         List<CitationView> citationViews = citations.stream().map(KnowledgeService::toView).toList();
         if (onCitations != null) onCitations.accept(citationViews);
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
-        RagAnswer answer = apiClient.answerStream(config, question, citations, onDelta);
+        List<ChatMessage> safeHistory = history == null ? List.of() : List.copyOf(history);
+        ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
+                question, safeHistory, citations);
+        RagAnswer answer = apiClient.answerStream(config, request, onDelta);
         return new AskResultView(answer.text(), citationViews, answer.model());
     }
-
     private List<RagCitation> retrieveCitations(IndexHandle handle, String question) {
         List<SearchResult> results = handle.engine().search(question, 8, "全部");
         return java.util.stream.IntStream.range(0, Math.min(6, results.size()))

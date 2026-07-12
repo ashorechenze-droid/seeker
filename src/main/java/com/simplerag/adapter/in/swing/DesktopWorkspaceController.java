@@ -62,7 +62,7 @@ public final class DesktopWorkspaceController {
         this.tasks = tasks;
         this.files = files;
         this.activeKnowledgeChanged = activeKnowledgeChanged;
-        this.askPanel = new AskPanel(this::askQuestion, this::saveApiConfig, this::fetchModels, this::openCitation);
+        this.askPanel = new AskPanel(this::askQuestion, this::saveApiConfig, this::fetchModels, this::openCitation, this::clearConversation);
         this.searchPanel = new SearchPanel(this::scheduleSearch, this::setPreview,
                 this::openSelectedFile, this::openSelectedDirectory, this::copySelectedChunk);
         this.knowledgePanel = new KnowledgePanel(this::createKnowledgeBase, this::editKnowledgeBase,
@@ -101,13 +101,14 @@ public final class DesktopWorkspaceController {
     }
 
     private void installQuestionShortcut() {
-        askPanel.questionArea().getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER,
-                Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "ask");
-        askPanel.questionArea().getActionMap().put("ask", new javax.swing.AbstractAction() {
+        javax.swing.JTextArea area = askPanel.questionArea();
+        area.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "ask-send");
+        area.getActionMap().put("ask-send", new javax.swing.AbstractAction() {
             @Override public void actionPerformed(ActionEvent event) { askQuestion(); }
         });
+        // Keep Shift+Enter as newline (default insert-break behavior).
+        area.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, java.awt.event.InputEvent.SHIFT_DOWN_MASK), "insert-break");
     }
-
     private void refreshAll() { refreshKnowledgeBases(); refreshSourcesAndStats(); }
     private void refreshKnowledgeBases() {
         KnowledgeBase current = knowledge.current();
@@ -230,27 +231,70 @@ public final class DesktopWorkspaceController {
         String question = askPanel.question(); if (question.isEmpty()) return; ApiConfig config = askPanel.config();
         try { config.validateForChat(); ask.saveConfig(config); }
         catch (RuntimeException failure) { showError("API 配置不完整", failure); return; }
-        askPanel.asking(true); KnowledgeController.TaskIdentity identity = knowledge.identity();
-        askPanel.answerTitle("正在检索并生成回答..."); askPanel.answer(""); askPanel.clearCitations();
+        askPanel.asking(true);
+        askPanel.clearQuestion();
+        KnowledgeController.TaskIdentity identity = knowledge.identity();
+        // Bind UI session to knowledgeBaseId + sourceRevision; store replaces session on revision change.
+        ask.sessionFor(identity);
+        askPanel.beginTurn(question);
         askTask = tasks.<AskResultView, String>submit(identity, knowledge::identity, publish ->
                 ask.ask(identity, question, config,
                         citations -> { if (isCurrentIdentity(identity)) publishCitations(citations); },
                         delta -> { if (isCurrentIdentity(identity)) publish.accept(delta); }), chunks -> {
-                    for (String chunk : chunks) askPanel.appendAnswer(chunk); askPanel.answerCaret(askPanel.answerLength());
-                }, answer -> { askPanel.asking(false); askPanel.answerTitle("回答 · " + answer.model());
-                    if (askPanel.answerLength() == 0) askPanel.answer(answer.text()); askPanel.answerCaret(0);
+                    for (String chunk : chunks) askPanel.appendAssistantDelta(chunk);
+                }, answer -> {
+                    askPanel.asking(false);
+                    askPanel.finishAssistant(answer.text(), answer.model());
                     flashStatus("问答完成，引用 " + answer.citations().size() + " 个片段");
-                }, failure -> { askPanel.asking(false); askPanel.answerTitle("生成失败"); askPanel.answer(failure.getMessage()); flashStatus("问答失败"); },
-                () -> { askPanel.asking(false); askPanel.answerTitle("已停止"); flashStatus("问答已停止"); });
+                }, failure -> {
+                    askPanel.asking(false);
+                    askPanel.failAssistant(failure.getMessage());
+                    flashStatus("问答失败");
+                },
+                () -> {
+                    askPanel.asking(false);
+                    askPanel.stopAssistant();
+                    flashStatus("问答已停止");
+                });
     }
     private void publishCitations(List<CitationView> citations) {
-        javax.swing.SwingUtilities.invokeLater(() -> { askPanel.citations(citations);
-            askPanel.answerTitle(citations.isEmpty() ? "未找到相关引用，正在生成..." : "正在生成回答..."); });
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            askPanel.citations(citations);
+            askPanel.conversationTitle(citations.isEmpty() ? "未找到相关引用，正在生成…" : "正在生成回答…");
+            askPanel.conversationMeta(citations.isEmpty()
+                    ? "本轮检索无命中片段，模型将据实说明"
+                    : "本轮引用 " + citations.size() + " 个片段 · 不写入历史");
+        });
+    }
+
+    private void clearConversation() {
+        if (askTask != null && !askTask.isDone()) askTask.cancel();
+        KnowledgeController.TaskIdentity identity = knowledge.identity();
+        ask.clearSession(identity);
+        askPanel.asking(false);
+        askPanel.resetConversation("对话已清空", "多轮上下文已重置 · 仍绑定当前知识库版本");
+        flashStatus("对话已清空");
     }
 
     private void clearWorkspace() {
-        clearTasks(); askPanel.asking(false); searchPanel.clear(); askPanel.clearCitations();
-        askPanel.answerTitle("知识库回答"); askPanel.answer("当前知识库已切换，可以开始新的问答。"); setPreview(null);
+        clearTasks();
+        askPanel.asking(false);
+        searchPanel.clear();
+        reloadConversationUi();
+        setPreview(null);
+    }
+
+    /** Sync chat transcript with in-memory session for current knowledgeBaseId + sourceRevision. */
+    private void reloadConversationUi() {
+        KnowledgeController.TaskIdentity identity = knowledge.identity();
+        var session = ask.sessionFor(identity);
+        if (session.isEmpty()) {
+            askPanel.resetConversation("对话", "多轮上下文已启用 · 历史绑定 knowledgeBaseId + sourceRevision");
+        } else {
+            askPanel.showMessages(session.messages());
+            askPanel.conversationTitle("对话");
+            askPanel.conversationMeta(session.size() + " 条消息 · revision " + identity.sourceRevision());
+        }
     }
     private void clearTasks() {
         if (searchTask != null && !searchTask.isDone()) searchTask.cancel();

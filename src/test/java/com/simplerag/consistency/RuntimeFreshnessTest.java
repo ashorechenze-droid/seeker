@@ -1,5 +1,6 @@
 package com.simplerag.consistency;
 
+import com.simplerag.application.conversation.ChatRequest;
 import com.simplerag.adapter.out.filesystem.FileSystemIndexRepository;
 import com.simplerag.adapter.out.filesystem.FileSystemSourceFreshnessMonitor;
 import com.simplerag.adapter.out.filesystem.FreshnessReconciler;
@@ -179,14 +180,15 @@ class RuntimeFreshnessTest {
                 "app-" + System.nanoTime() + ".db")));
         com.simplerag.application.port.out.ChatModel chat = new com.simplerag.application.port.out.ChatModel() {
             @Override public List<String> listModels(ApiConfig config) { return List.of(); }
-            @Override public com.simplerag.model.RagAnswer answer(ApiConfig config, String question,
-                    List<com.simplerag.model.RagCitation> citations) {
+            @Override public com.simplerag.model.RagAnswer answer(ApiConfig config,
+                    com.simplerag.application.conversation.ChatRequest request) {
                 requests.incrementAndGet();
-                return new com.simplerag.model.RagAnswer("", citations, "model");
+                return new com.simplerag.model.RagAnswer("", request.citations(), "model");
             }
-            @Override public com.simplerag.model.RagAnswer answerStream(ApiConfig config, String question,
-                    List<com.simplerag.model.RagCitation> citations, java.util.function.Consumer<String> onDelta) {
-                return answer(config, question, citations);
+            @Override public com.simplerag.model.RagAnswer answerStream(ApiConfig config,
+                    com.simplerag.application.conversation.ChatRequest request,
+                    java.util.function.Consumer<String> onDelta) {
+                return answer(config, request);
             }
         };
         return new KnowledgeService(provider, repository, repository, new SecretCodec(), chat,

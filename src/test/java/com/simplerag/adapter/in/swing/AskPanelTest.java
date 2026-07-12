@@ -13,7 +13,7 @@ class AskPanelTest {
     void canBeConstructedAndConfiguredWithoutMainFrame() throws Exception {
         AtomicReference<AskPanel> panel = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {
-            AskPanel created = new AskPanel(() -> { }, () -> { }, button -> { }, () -> { });
+            AskPanel created = new AskPanel(() -> { }, () -> { }, button -> { }, () -> { }, () -> { });
             created.config(new ApiConfig("http://localhost:11434/v1", "secret", "local-model"));
             panel.set(created);
         });

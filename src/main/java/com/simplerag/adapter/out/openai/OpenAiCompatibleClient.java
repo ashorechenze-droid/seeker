@@ -1,5 +1,7 @@
 package com.simplerag.adapter.out.openai;
 
+import com.simplerag.application.conversation.ChatMessage;
+import com.simplerag.application.conversation.ChatRequest;
 import com.simplerag.rag.ApiConfig;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -24,6 +26,10 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.function.Consumer;
 
+/**
+ * OpenAI-compatible chat adapter. Converts {@link ChatRequest} into provider messages only;
+ * retrieval, freshness and session ownership stay in the application layer.
+ */
 public final class OpenAiCompatibleClient implements com.simplerag.application.port.out.ChatModel {
     private final HttpClient httpClient;
     private final ObjectMapper json;
@@ -37,6 +43,7 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
         this.json = json;
     }
 
+    @Override
     public List<String> listModels(ApiConfig config) throws IOException, InterruptedException {
         config.validateForModels();
         HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "models"))
@@ -59,17 +66,17 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
         return List.copyOf(models);
     }
 
-    public RagAnswer answer(ApiConfig config, String question, List<RagCitation> citations)
-            throws IOException, InterruptedException {
-        validateAnswerInput(config, question, citations);
-        ObjectNode payload = chatPayload(config, question, citations, false);
+    @Override
+    public RagAnswer answer(ApiConfig config, ChatRequest chatRequest) throws IOException, InterruptedException {
+        validateAnswerInput(config, chatRequest);
+        ObjectNode payload = chatPayload(config, chatRequest, false);
         HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "chat/completions"))
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload))).build();
         JsonNode response = send(request);
         JsonNode content = response.path("choices").path(0).path("message").path("content");
         String answer = content.isTextual() ? content.asText() : flattenContent(content);
         if (answer.isBlank()) throw new IOException("API 返回了空答案");
-        return new RagAnswer(answer.strip(), List.copyOf(citations), config.model());
+        return new RagAnswer(answer.strip(), List.copyOf(chatRequest.citations()), config.model());
     }
 
     /**
@@ -77,10 +84,11 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
      * incremental chunk of text. Falls back to the non-streaming {@link #answer} call when the server
      * does not honour SSE, so callers always receive a complete {@link RagAnswer}.
      */
-    public RagAnswer answerStream(ApiConfig config, String question, List<RagCitation> citations,
-                                  Consumer<String> onDelta) throws IOException, InterruptedException {
-        validateAnswerInput(config, question, citations);
-        ObjectNode payload = chatPayload(config, question, citations, true);
+    @Override
+    public RagAnswer answerStream(ApiConfig config, ChatRequest chatRequest, Consumer<String> onDelta)
+            throws IOException, InterruptedException {
+        validateAnswerInput(config, chatRequest);
+        ObjectNode payload = chatPayload(config, chatRequest, true);
         HttpRequest request = request(config, endpoint(config.normalizedBaseUrl(), "chat/completions"))
                 .header("Accept", "text/event-stream")
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload))).build();
@@ -88,7 +96,7 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
         HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             response.body().close();
-            return answer(config, question, citations);
+            return answer(config, chatRequest);
         }
         StringBuilder full = new StringBuilder();
         boolean streamed = false;
@@ -112,27 +120,37 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
             }
         }
         if (!streamed) {
-            // The endpoint accepted the request but did not emit SSE frames; retry without streaming.
-            return answer(config, question, citations);
+            return answer(config, chatRequest);
         }
         if (full.toString().isBlank()) throw new IOException("API 返回了空答案");
-        return new RagAnswer(full.toString().strip(), List.copyOf(citations), config.model());
+        return new RagAnswer(full.toString().strip(), List.copyOf(chatRequest.citations()), config.model());
     }
 
-    private void validateAnswerInput(ApiConfig config, String question, List<RagCitation> citations) {
+    private void validateAnswerInput(ApiConfig config, ChatRequest chatRequest) {
         config.validateForChat();
-        if (question == null || question.isBlank()) throw new IllegalArgumentException("请输入问题");
-        if (citations.isEmpty()) throw new IllegalArgumentException("当前知识库没有可用于回答的相关内容");
+        if (chatRequest == null) throw new IllegalArgumentException("ChatRequest 不能为空");
+        if (chatRequest.question() == null || chatRequest.question().isBlank()) {
+            throw new IllegalArgumentException("请输入问题");
+        }
+        if (chatRequest.citations().isEmpty()) {
+            throw new IllegalArgumentException("当前知识库没有可用于回答的相关内容");
+        }
     }
 
-    private ObjectNode chatPayload(ApiConfig config, String question, List<RagCitation> citations, boolean stream) {
+    /** Adapter-only mapping: ChatRequest → provider messages. No retrieval or session logic. */
+    private ObjectNode chatPayload(ApiConfig config, ChatRequest chatRequest, boolean stream) {
         ObjectNode payload = json.createObjectNode();
         payload.put("model", config.model());
         payload.put("temperature", 0.2);
         payload.put("stream", stream);
         ArrayNode messages = payload.putArray("messages");
         messages.addObject().put("role", "system").put("content", systemPrompt());
-        messages.addObject().put("role", "user").put("content", userPrompt(question, citations));
+        for (ChatMessage prior : chatRequest.history()) {
+            String role = prior.role() == ChatMessage.Role.ASSISTANT ? "assistant" : "user";
+            messages.addObject().put("role", role).put("content", prior.content());
+        }
+        messages.addObject().put("role", "user")
+                .put("content", userPrompt(chatRequest.question(), chatRequest.citations()));
         return payload;
     }
 
@@ -146,7 +164,6 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
             }
             return content.isTextual() ? content.asText() : "";
         } catch (IOException malformedFrame) {
-            // A partial SSE frame can arrive split across reads; skipping it keeps the stream alive.
             return "";
         }
     }
@@ -191,6 +208,7 @@ public final class OpenAiCompatibleClient implements com.simplerag.application.p
                 每个事实后使用 [1]、[2] 形式标注来源编号；编号必须来自资料标题。
                 如果资料不足以回答，明确说明“当前知识库中没有足够信息”，不要编造。
                 保留代码、命令、路径和配置名称的原始拼写。回答使用用户提问的语言。
+                若存在多轮对话历史，仅用其理解指代与延续性；事实与引用必须以本轮检索资料为准。
                 """.strip();
     }
 
