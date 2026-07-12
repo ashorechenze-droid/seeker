@@ -1,6 +1,6 @@
 # SimpleRAG
 
-SimpleRAG 是一个 Java 17 + Swing 桌面端本地知识库客户端，支持多知识库、中英文文档与代码检索、语义片段高亮，以及基于 OpenAI 兼容 API 的带引用 RAG 问答。
+SimpleRAG 是一个 Java 17 + Swing 桌面端本地知识库客户端，支持多知识库、中英文文档与代码检索、语义片段高亮，以及基于 OpenAI 兼容 API 的带引用、多轮 RAG 问答（聊天气泡 UI）。
 
 文件扫描、分块、TF-IDF 特征、ONNX embedding 和索引持久化均在本机完成。语义模型通过 LangChain4j 的 in-process ONNX Runtime 在 JVM 内运行，不依赖 Python，也不会把文档上传到 embedding 服务。
 
@@ -113,6 +113,15 @@ POST <baseUrl>/chat/completions
 
 问答时最多召回 6 个片段，发送问题、片段路径、行号和内容，并要求模型用 `[1]`、`[2]` 标注引用。回答支持 SSE 流式显示和随时停止；服务不支持 SSE 时自动回退到非流式响应。
 
+知识问答页采用聊天气泡 UI（用户右对齐 / 助手左对齐），支持多轮追问：
+
+- 多轮历史由内存模块 `application.conversation` 管理，绑定当前 `knowledgeBaseId + sourceRevision`。
+- 历史只保留 user/assistant 文本，不保留引用片段；每一轮都会重新检索并重新做 freshness 检查。
+- 默认最多保留约 12 轮、约 3000 token（粗估 chars/4）上下文；失败或取消的轮次不写入历史。
+- Enter 发送、Shift+Enter 换行，可清空对话；右侧展示「本轮引用」，双击打开源文件。
+- 助手多行回答会按聊天区域宽度铺开，短消息按内容收缩，避免气泡之间出现大片留白。
+- 会话仅保存在内存，应用退出后不会恢复（SQLite 持久化尚未接入）。
+
 远程 RAG 只允许使用 `READY`、`published_index_revision == source_revision` 且运行期 freshness 已被证明的索引。系统在召回前和实际 HTTP 发送前各执行一次 freshness gate；`DIRTY`、`BUILDING`、`FAILED`、`INCOMPATIBLE`、监控中断或核对状态未知时，请求会在任何远程调用前被拒绝。
 
 安全边界：
@@ -171,6 +180,7 @@ adapter.in.swing
                 |
                 v
 application.port.in -> 独立 use cases + application DTO
+application.conversation（内存多轮会话）
                 |
                 v
 ActiveKnowledgeRuntime + IndexLifecycle
@@ -219,7 +229,7 @@ SQLite output ports 已按知识库、数据源、发布、freshness 和设置�
 
 脚本依次运行：
 
-- JUnit 5 运行态生命周期、页面独立构造、事务、一致性、迁移、失败、取消、隐私和过期任务测试；
+- JUnit 5 运行态生命周期、页面独立构造、多轮对话模块、事务、一致性、迁移、失败、取消、隐私和过期任务测试；
 - 递归 watcher、动态子目录、`OVERFLOW` 完整核对和周期 reconciliation 测试；
 - 同会话修改/删除文件、监控关闭时远程请求数为 0，以及构建期间文件变化的竞态测试；
 - 增量 planner 表驱动测试、单文件 embedding 复用、删除清理、模型/reader/chunker 版本回退和全量等价性测试；

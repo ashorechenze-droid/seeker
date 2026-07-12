@@ -228,6 +228,8 @@ proof knowledgeBaseId/sourceRevision == 当前任务
 
 允许调用时只发送最多 6 个召回片段的路径、行号、内容和用户问题，不发送整个知识库。API Key 使用 AES-GCM 加密存储；其安全级别是应用级本地保护，不是操作系统凭据保险库。
 
+多轮对话由独立的 `application.conversation` 模块管理（见第 17 节）。每一轮问答都会重新执行 freshness 检查与知识检索；对话历史只保留 user/assistant 文本，不会沿用上一轮的引用片段。失败或用户取消的轮次不会写入会话历史。
+
 ## 9. 后台任务身份
 
 `IndexHandle` 和 Swing controller 统一绑定：
@@ -265,6 +267,10 @@ com.simplerag
 │  │  ├─ ChatModel
 │  │  ├─ SecretStore
 │  │  └─ SourceFreshnessMonitor
+│  ├─ conversation
+│  │  ├─ ChatMessage / ChatRequest
+│  │  ├─ ConversationContext / ConversationSession
+│  │  └─ ConversationStore（内存会话，按 knowledgeBaseId 索引）
 │  ├─ freshness
 │  │  ├─ SourceFingerprint / FreshnessSnapshot
 │  │  └─ FreshnessGate
@@ -377,7 +383,7 @@ mvn.cmd -q test
 - 同一文件集合的增量构建与全量构建产生等价 entries、chunks 和 embeddings。
 - 增量 embedding 失败时，旧 published revision 和旧 revision 文件保持不变。
 
-另有纯应用层测试使用内存 repository、内存 index repository、fake embedder、fake chat model 和 fake secret store 运行完整重建与问答用例，不启动 Swing、SQLite、ONNX 或 HTTP 服务。
+另有纯应用层测试使用内存 repository、内存 index repository、fake embedder、fake chat model 和 fake secret store 运行完整重建与问答用例，不启动 Swing、SQLite、ONNX 或 HTTP 服务。多轮对话模块由 `ConversationModulesTest` 覆盖 revision 绑定、token/轮次裁剪与请求不可变性；`AskPanelTest` 覆盖问答页独立构造。
 该组测试还注入索引保存失败和数据库发布失败，验证两类故障都不会移动已发布 revision 或替换活动索引。
 
 ArchUnit 检查：
@@ -412,6 +418,7 @@ CourseFeaturesTest: knowledge-base CRUD and RAG API checks passed
 - 当前 watcher/reconciliation 只监控本机当前活动知识库；切换到其他知识库时会重新加载索引并执行完整身份校验。
 - API Key 尚未接入 Windows Credential Manager。
 - `KnowledgeService` 仍保留兼容 facade，供既有命令行回归和构建流程复用；生产桌面组合中的搜索、问答和 API 设置已经直接装配独立用例。
+- 多轮对话会话仅保存在内存（`ConversationStore`），应用退出后不会恢复；SQLite 持久化按计划单独提交。
 
 ## 15. 第二阶段结构稳定化结果
 
@@ -474,3 +481,83 @@ SettingsRepository
 watcher 确认外部文件变化时条件递增 `source_revision`；对已经 `READY` 的 revision 主动重建时，`beginIndexBuildRevision` 也会原子分配下一 revision。因此增量构建总能写入新的 `<revision>.bin`。保存、embedding、取消或数据库条件发布失败时，`published_index_revision` 仍指向旧文件，活动 `IndexHandle` 也不会切换。
 
 自动化证据位于 `IncrementalIndexTest` 与 `RuntimeFreshnessTest.failedIncrementalBuildKeepsPreviouslyPublishedRevisionFile`，覆盖单文件向量化、删除、版本回退、全量等价和失败保留旧 revision。
+
+## 17. 多轮对话与问答页聊天气泡 UI
+
+### 17.1 已完成范围
+
+- 多轮对话做成独立 application 模块，与检索/freshness/索引生命周期解耦。
+- 知识问答页改为接近主流产品的聊天气泡 UI（用户右对齐、助手左对齐）。
+- 继续修气泡布局：消息行按内容高度收缩，长回答按聊天列宽铺开，消除 BoxLayout 纵向拉伸造成的大片留白。
+
+### 17.2 多轮对话模块（内存）
+
+新增包 `application.conversation`：
+
+| 类型 | 职责 |
+| --- | --- |
+| `ChatMessage` | user/assistant/system 消息值对象；估算 token（粗估 chars/4） |
+| `ConversationSession` | 单会话历史；绑定 `knowledgeBaseId + sourceRevision` |
+| `ConversationContext` | 裁剪策略：默认最多 12 轮、约 3000 token |
+| `ConversationStore` | 按知识库索引的内存会话表；revision 变化时替换会话 |
+| `ChatRequest` | 不可变出站请求：当前问题 + 历史 + **本轮** citations |
+
+不变量与边界：
+
+- 历史绑定 `knowledgeBaseId + sourceRevision`；切换知识库或 revision 变化会打开新会话，旧历史不可复用。
+- 历史只保留 user/assistant 文本，**不保留**引用片段或文件路径上下文。
+- 每一轮 `AskUseCase` 仍重新做 freshness 检查与知识检索；历史不得重新引入旧 citations。
+- 默认预算：最多 12 轮、约 3000 token（粗估 chars/4）；超出时从最旧完整 user 轮次裁剪。
+- 失败轮次与用户取消不写入历史；成功后才 `appendUser` / `appendAssistant`。
+- `ConversationStore` 明确不写 SQLite（本阶段按产品要求单独提交持久化）。
+
+`AskController` 在流式问答前快照 `historyForRequest`，成功回调时再次确认 store 仍持有同一 session 对象后再提交轮次，避免知识库切换竞态把回答写进错误会话。
+
+### 17.3 问答页气泡 UI（`AskPanel`）
+
+页面结构：
+
+```text
+API 配置条
+对话标题 / 元信息 / 清空对话
+┌──────────────────────────────┬────────────┐
+│ 气泡 transcript（可滚动）     │ 本轮引用   │
+│  用户：右对齐青绿气泡         │ 侧栏列表   │
+│  助手：左对齐深色描边气泡     │ 双击打开   │
+└──────────────────────────────┴────────────┘
+圆角输入框 + 发送/停止
+```
+
+交互：
+
+- Enter 发送，Shift+Enter 换行；生成中按钮切换为「停止」。
+- 右侧「本轮引用」侧栏只展示当前轮 citations；历史不沿用旧片段。
+- 切换知识库 / revision 变化后，会话 UI 同步清空或切换到新 session。
+- 流式 delta 追加到助手气泡；失败气泡标红，且不进入多轮历史。
+
+布局修复（消除大片留白）：
+
+| 问题 | 处理 |
+| --- | --- |
+| `BoxLayout` 将消息行 `maxHeight` 拉到 `Integer.MAX_VALUE` | 行高改为内容 preferred height，消息紧贴排列 |
+| 气泡最大宽度写死 720px | 助手多行回答约铺满聊天列宽（~96%）；用户气泡 ~78% 上限并右对齐 |
+| 窗口缩放后气泡不重算 | viewport resize 时 `relayoutBubbles()` 重算宽度与行高 |
+| 短消息被撑成固定宽卡片 | 短消息按文本宽度收缩，长/多行助手消息优先填满列宽 |
+
+### 17.4 验证
+
+相关自动化：
+
+- `ConversationModulesTest`：revision 绑定、裁剪预算、ChatRequest 不可变、历史不含引用路径。
+- `AskPanelTest`：不依赖 `MainFrame` 的独立构造与 API 配置。
+- `ArchitectureTest`、`KnowledgeServiceUnitTest`、`RuntimeFreshnessTest`：分层与 freshness/问答路径回归。
+
+手工/构建：
+
+```powershell
+mvn.cmd -q -DskipTests compile
+mvn.cmd -q -Dtest=AskPanelTest,ConversationModulesTest test
+```
+
+`mvn compile` 与上述测试已通过。完整回归仍建议 `.\build-and-test.cmd`。
+

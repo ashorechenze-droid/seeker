@@ -1,5 +1,7 @@
 package com.simplerag.application.usecase;
 
+import com.simplerag.application.conversation.ChatMessage;
+import com.simplerag.application.conversation.ChatRequest;
 import com.simplerag.application.dto.AskResultView;
 import com.simplerag.application.dto.CitationView;
 import com.simplerag.application.dto.DocumentReference;
@@ -34,15 +36,22 @@ public final class AskUseCase implements AskKnowledge {
         this.freshnessGate = freshnessGate;
         this.chat = chat;
     }
-    @Override public AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question,
-                                             ApiConfig config, Consumer<List<CitationView>> onCitations,
-                                             Consumer<String> onDelta) throws IOException, InterruptedException {
+
+    @Override
+    public AskResultView askStream(String knowledgeBaseId, long expectedRevision, String question,
+                                   List<ChatMessage> history, ApiConfig config,
+                                   Consumer<List<CitationView>> onCitations, Consumer<String> onDelta)
+            throws IOException, InterruptedException {
         IndexHandle handle = requireReady(knowledgeBaseId, expectedRevision);
+        // Every turn re-runs retrieval; history must never reintroduce prior citation snippets.
         List<RagCitation> citations = retrieve(handle, question);
         List<CitationView> views = citations.stream().map(AskUseCase::toView).toList();
         if (onCitations != null) onCitations.accept(views);
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
-        RagAnswer answer = chat.answerStream(config, question, citations, onDelta);
+        List<ChatMessage> safeHistory = history == null ? List.of() : List.copyOf(history);
+        ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
+                question, safeHistory, citations);
+        RagAnswer answer = chat.answerStream(config, request, onDelta);
         return new AskResultView(answer.text(), views, answer.model());
     }
 

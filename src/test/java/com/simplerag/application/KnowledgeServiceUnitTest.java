@@ -1,5 +1,6 @@
 package com.simplerag.application;
 
+import com.simplerag.application.conversation.ChatRequest;
 import com.simplerag.application.port.out.ChatModel;
 import com.simplerag.application.port.out.IndexRepository;
 import com.simplerag.application.port.out.KnowledgeBaseRepository;
@@ -236,13 +237,12 @@ class KnowledgeServiceUnitTest {
 
     private static final class FakeChatModel implements ChatModel {
         @Override public List<String> listModels(ApiConfig config) { return List.of("fake"); }
-        @Override public RagAnswer answer(ApiConfig config, String question, List<RagCitation> citations) {
-            return new RagAnswer("fake answer", citations, "fake");
+        @Override public RagAnswer answer(ApiConfig config, ChatRequest request) {
+            return new RagAnswer("fake answer", request.citations(), "fake");
         }
-        @Override public RagAnswer answerStream(ApiConfig config, String question, List<RagCitation> citations,
-                                                Consumer<String> onDelta) {
+        @Override public RagAnswer answerStream(ApiConfig config, ChatRequest request, Consumer<String> onDelta) {
             if (onDelta != null) onDelta.accept("fake answer");
-            return answer(config, question, citations);
+            return answer(config, request);
         }
     }
 }
