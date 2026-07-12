@@ -20,4 +20,17 @@ class QueryAnalyzerTest {
         assertTrue(query.concepts().contains("concept:database-connection"));
         assertTrue(query.vectorNorm() > 0);
     }
+
+    @Test
+    void removesLocationBoilerplateButPreservesTheActualCodeSubject() {
+        QueryAnalyzer analyzer = new QueryAnalyzer(new LexicalFeatureExtractor());
+
+        QueryAnalyzer.AnalyzedQuery query = analyzer.analyze("请帮我找接口超时重试相关代码在哪？", Map.of(), 8);
+
+        assertTrue(query.codeIntent());
+        assertTrue(query.locationIntent());
+        assertEquals("接口超时重试", query.semanticText());
+        assertTrue(query.concepts().contains("concept:error-handling"));
+        assertTrue(query.tokens().keySet().stream().noneMatch(token -> token.contains("在哪")));
+    }
 }

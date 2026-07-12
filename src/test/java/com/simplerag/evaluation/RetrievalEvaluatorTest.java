@@ -32,12 +32,12 @@ class RetrievalEvaluatorTest {
         assertEquals(1.0, report.mrrAt10());
         assertEquals(1.0, report.ndcgAt10());
         assertFalse(report.cases().get(0).forbiddenResultReturned());
-        assertEquals(1, report.rankingPolicyVersion());
+        assertEquals(2, report.rankingPolicyVersion());
         assertTrue(report.estimatedMemoryBytesPerThousandChunks() > 0);
         assertDoesNotThrow(() -> evaluator.verifyThresholds(dataset, report));
         Path output = temp.resolve("reports/report.json");
         evaluator.save(report, output);
-        assertTrue(Files.readString(output).contains("\"rankingPolicyVersion\" : 1"));
+        assertTrue(Files.readString(output).contains("\"rankingPolicyVersion\" : 2"));
     }
 
     private static final class DisabledEmbedder implements TextEmbedder {

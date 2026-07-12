@@ -416,7 +416,7 @@ nDCG@10
 
 ### 实施结果与证据
 
-- `examples/evaluation/retrieval-baseline.json` 固定 6 类查询，覆盖中问英、中英混合、代码标识符、精确配置键、跨语言界面描述和敏感内容负例，并在数据集中声明 Recall@5、MRR@10、nDCG@10 最低阈值。
+- `examples/evaluation/retrieval-baseline.json` 固定 8 个查询，覆盖中问英、中英混合、代码标识符、精确配置键、跨语言界面描述、敏感内容负例、自然语言代码定位和符号定义定位，并在数据集中声明 Recall@5、MRR@10、nDCG@10 最低阈值。
 - `RetrievalEvaluator` 统一计算 Recall@5、MRR@10、nDCG@10、首次/缓存查询延迟、索引耗时和每千 chunks 估算内存；逐查询结果同时检查 `mustNotReturn`。
 - JSON 报告记录 dataset/version、`RankingPolicy.version`、指标、性能数据和逐查询排名，可用于同一数据集的前后对比。
 - `RetrievalEvaluationMain` 位于 bootstrap，遵守 infrastructure 只由组装层创建的边界；`build-and-test.cmd` 在真实 ONNX 回归后运行质量门禁，低于阈值或出现禁止结果即失败。
@@ -506,7 +506,7 @@ warnings
 - 新增持久化 `ModelFileSignatureCache`：以规范路径、文件大小、mtime 和 filesystem identity 校验缓存，模型元数据变化即重算 SHA-256；缓存文件使用临时文件和原子移动发布。
 - 新增 `PerformanceBenchmarkMain`，固定记录数据集路径/签名、文件数、Windows/Java/CPU/堆信息、优化前完整 hash 与优化后缓存命中的耗时及签名等价性；`build-and-test.cmd` 在质量门禁后生成报告。
 - 2026-07-12 固定 `examples/knowledge`（SHA-256 `a4281c26...8e18de`）、Windows 11、Java 17.0.8、16 logical processors、约 3.95 GiB max heap：完整 hash 115.5649 ms，缓存命中 23.7596 ms，4.86x，签名完全一致。
-- 同一数据集真实 ONNX 回归：Recall@5 1.000、MRR@10 1.000、nDCG@10 0.988；cold query 9.315 ms、cached query 1.065 ms，未降低质量门槛、freshness 或原子发布保证。
+- 扩充后的 8-query 数据集真实 ONNX 回归：Recall@5 1.000、MRR@10 1.000、nDCG@10 0.991；cold query 8.762 ms、cached query 1.437 ms，未降低质量门槛、freshness 或原子发布保证。
 - `ModelFileSignatureCacheTest` 覆盖稳定缓存和模型文件变化失效；报告写入 `target/performance/performance-report.json`。
 
 ## 10. 第七阶段：安全与可运维性（已完成）

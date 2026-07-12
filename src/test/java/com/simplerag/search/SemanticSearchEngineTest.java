@@ -30,6 +30,17 @@ public final class SemanticSearchEngineTest {
         check(!retry.isEmpty() && retry.get(0).chunk().fileName().equals("retry-and-errors.py"),
                 "文件类型过滤和错误处理概念应共同生效");
 
+        List<SearchResult> retryLocation = engine.search("接口超时重试相关代码在哪", 5, "全部");
+        check(!retryLocation.isEmpty() && retryLocation.get(0).chunk().fileName().equals("retry-and-errors.py"),
+                "代码定位问题应去除泛化问法并优先返回相关代码文件");
+        check(retryLocation.get(0).reason().contains("代码") || retryLocation.get(0).reason().contains("路径")
+                        || retryLocation.get(0).reason().contains("语义"),
+                "代码定位结果应给出可解释的命中原因");
+
+        List<SearchResult> symbolLocation = engine.search("request_with_retry 定义在哪个文件", 5, "全部");
+        check(!symbolLocation.isEmpty() && symbolLocation.get(0).chunk().fileName().equals("retry-and-errors.py"),
+                "方法定义定位应奖励声明和文件路径信号");
+
         if (engine.semanticEnabled()) {
             List<SearchResult> navigation = engine.search("怎样收起左边栏给编辑区域更多空间", 5, "全部");
             check(!navigation.isEmpty() && navigation.get(0).chunk().fileName().equals("ui-navigation.md"),

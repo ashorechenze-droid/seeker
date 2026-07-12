@@ -121,7 +121,7 @@ public final class SemanticSearchEngine {
         float[] semanticQuery = null;
         if (semanticCompatible) {
             try {
-                semanticQuery = semanticQuery(cleaned);
+                semanticQuery = semanticQuery(analyzed.semanticText());
                 if (!semanticScorer.queryCompatible(semanticQuery,
                         current.chunks.stream().map(item -> item.chunk).toList())) semanticQuery = null;
                 embeddingsActive = semanticQuery != null;
@@ -144,10 +144,13 @@ public final class SemanticSearchEngine {
             double lexicalScore = lexical.value();
             double semanticScore = semanticQuery != null && chunk.hasEmbedding()
                     ? Math.max(0.0, semanticScorer.score(semanticQuery, chunk.embedding())) : 0.0;
-            double score = rankingPolicy.combine(semanticScore, lexicalScore, semanticQuery != null);
+            double score = rankingPolicy.combine(semanticScore, lexicalScore, semanticQuery != null,
+                    analyzed.metadataFocused());
             if (lexicalScore >= rankingPolicy.lexicalResultThreshold()
                     || semanticScore >= rankingPolicy.semanticResultThreshold()) {
-                String reason = semanticScore >= rankingPolicy.semanticResultThreshold() && semanticScore >= lexicalScore
+                String reason = lexical.declarationMatch() ? "代码定义匹配"
+                        : lexical.metadataMatch() && analyzed.locationIntent() ? "文件路径匹配"
+                        : semanticScore >= rankingPolicy.semanticResultThreshold() && semanticScore >= lexicalScore
                         ? "向量语义匹配" : lexical.conceptMatches() > 0 ? "语义概念匹配"
                         : lexical.exactMatch() ? "原文匹配" : "内容相似";
                 results.add(new SearchResult(chunk, Math.min(1.0, score), reason));

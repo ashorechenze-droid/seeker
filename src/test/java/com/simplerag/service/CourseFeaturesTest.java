@@ -68,6 +68,8 @@ public final class CourseFeaturesTest {
         check(answer.text().contains("environment variables"), "应返回模拟 RAG 答案");
         check(!answer.citations().isEmpty(), "RAG 答案必须包含引用");
         check(chatRequest.get().contains("database-connection.md"), "发送给模型的上下文应包含来源文件");
+        check(chatRequest.get().contains("只读检索资料"), "prompt 应把召回正文标记为不可信只读资料");
+        check(chatRequest.get().contains("文件路径"), "prompt 应要求代码定位回答保留准确路径和位置");
 
         StringBuilder streamed = new StringBuilder();
         AtomicReference<List<?>> streamedCitations = new AtomicReference<>();

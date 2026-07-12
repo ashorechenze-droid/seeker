@@ -13,8 +13,10 @@ import javax.swing.JComboBox;
 import javax.swing.JCheckBox;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPasswordField;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
@@ -36,6 +38,8 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.RenderingHints;
+import java.awt.Toolkit;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
@@ -142,6 +146,29 @@ public final class AskPanel extends JPanel {
 
     public void conversationTitle(String text) { conversationTitle.setText(text); }
     public void conversationMeta(String text) { conversationMeta.setText(text); }
+
+    /** Plain-text transcript used by the copy action and UI tests. */
+    public String conversationText() {
+        StringBuilder result = new StringBuilder();
+        for (BubblePanel bubble : bubbles) {
+            if (!result.isEmpty()) result.append("\n\n");
+            result.append(bubble.user ? "你" : "助手").append("：\n").append(bubble.text());
+        }
+        return result.toString();
+    }
+
+    public String latestAnswerWithCitations() {
+        String answer = "";
+        for (int index = bubbles.size() - 1; index >= 0; index--) {
+            if (!bubbles.get(index).user) {
+                answer = bubbles.get(index).text();
+                break;
+            }
+        }
+        String references = citationText();
+        if (answer.isBlank()) return references;
+        return references.isBlank() ? answer : answer + "\n\n引用：\n" + references;
+    }
 
     public void showMessages(List<ChatMessage> messages) {
         resetTranscript();
@@ -378,6 +405,18 @@ public final class AskPanel extends JPanel {
         clearChat.addActionListener(e -> onClearChat.run());
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
         actions.setOpaque(false);
+        JButton copyConversation = new JButton("复制对话");
+        Theme.styleButton(copyConversation, false);
+        copyConversation.setMargin(new Insets(7, 12, 7, 12));
+        copyConversation.addActionListener(e -> copy(conversationText()));
+        JButton copyAnswer = new JButton("复制回答+引用");
+        Theme.styleButton(copyAnswer, false);
+        copyAnswer.setMargin(new Insets(7, 12, 7, 12));
+        copyAnswer.addActionListener(e -> copy(latestAnswerWithCitations()));
+        actions.add(copyAnswer);
+        actions.add(Box.createHorizontalStrut(8));
+        actions.add(copyConversation);
+        actions.add(Box.createHorizontalStrut(8));
         actions.add(clearChat);
         header.add(actions, BorderLayout.EAST);
 
@@ -390,10 +429,18 @@ public final class AskPanel extends JPanel {
         JLabel citationHint = new JLabel("双击打开文件 · 历史不保留片段");
         citationHint.setForeground(Theme.MUTED);
         citationHint.setFont(Theme.UI_FONT.deriveFont(10f));
-        JPanel citationHeader = new JPanel(new BorderLayout());
+        JPanel citationHeader = new JPanel(new BorderLayout(6, 0));
         citationHeader.setOpaque(false);
-        citationHeader.add(citationTitle, BorderLayout.NORTH);
-        citationHeader.add(citationHint, BorderLayout.SOUTH);
+        JPanel citationLabels = new JPanel();
+        citationLabels.setOpaque(false);
+        citationLabels.setLayout(new BoxLayout(citationLabels, BoxLayout.Y_AXIS));
+        citationLabels.add(citationTitle); citationLabels.add(citationHint);
+        JButton copyCitations = new JButton("复制引用");
+        Theme.styleButton(copyCitations, false);
+        copyCitations.setMargin(new Insets(5, 8, 5, 8));
+        copyCitations.addActionListener(event -> copy(citationText()));
+        citationHeader.add(citationLabels, BorderLayout.CENTER);
+        citationHeader.add(copyCitations, BorderLayout.EAST);
         citationPanel.add(citationHeader, BorderLayout.NORTH);
         citationList.setBackground(Theme.PANEL);
         citationList.setFixedCellHeight(68);
@@ -472,7 +519,7 @@ public final class AskPanel extends JPanel {
         ask.setPreferredSize(new Dimension(96, 44));
         ask.addActionListener(e -> onAsk.run());
 
-        JLabel hint = new JLabel("Enter 发送 · Shift+Enter 换行 · 历史绑定知识库版本");
+        JLabel hint = new JLabel("Enter 发送 · Shift+Enter 换行 · 回答文本可选择，右键或 Ctrl+C 复制");
         hint.setForeground(Theme.MUTED);
         hint.setFont(Theme.UI_FONT.deriveFont(10f));
         hint.setBorder(new EmptyBorder(8, 2, 0, 0));
@@ -508,6 +555,23 @@ public final class AskPanel extends JPanel {
         return pane;
     }
 
+    private String citationText() {
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < citations.size(); index++) {
+            CitationView citation = citations.get(index);
+            if (!result.isEmpty()) result.append('\n');
+            result.append('[').append(citation.number()).append("] ")
+                    .append(citation.document().path()).append(" · ")
+                    .append(citation.document().sourceLocation());
+        }
+        return result.toString();
+    }
+
+    private static void copy(String text) {
+        if (text == null || text.isBlank()) return;
+        Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
+    }
+
     private static final class BubblePanel extends JPanel {
         private final boolean user;
         private final JTextArea body = new JTextArea();
@@ -533,11 +597,46 @@ public final class AskPanel extends JPanel {
             body.setForeground(user ? new Color(9, 30, 25) : Theme.TEXT);
             body.setText(text == null ? "" : text);
             body.setBorder(null);
-            body.setFocusable(false);
-            add(role, BorderLayout.NORTH);
+            body.setFocusable(true);
+            body.setSelectionColor(user ? new Color(28, 110, 91) : Theme.ACCENT_DARK);
+            body.setSelectedTextColor(Theme.TEXT);
+            installCopyMenu();
+            JPanel header = new JPanel(new BorderLayout());
+            header.setOpaque(false);
+            header.add(role, BorderLayout.WEST);
+            JButton copy = new JButton("复制");
+            copy.setFocusable(false);
+            copy.setBorderPainted(false);
+            copy.setContentAreaFilled(false);
+            copy.setForeground(user ? new Color(9, 30, 25) : Theme.MUTED);
+            copy.setFont(Theme.UI_FONT.deriveFont(9f));
+            copy.setMargin(new Insets(0, 4, 0, 4));
+            copy.addActionListener(event -> AskPanel.copy(body.getText()));
+            header.add(copy, BorderLayout.EAST);
+            add(header, BorderLayout.NORTH);
             add(body, BorderLayout.CENTER);
             setAlignmentX(user ? Component.RIGHT_ALIGNMENT : Component.LEFT_ALIGNMENT);
             setCursor(Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR));
+        }
+
+        String text() { return body.getText(); }
+
+        private void installCopyMenu() {
+            JPopupMenu menu = new JPopupMenu();
+            JMenuItem selected = new JMenuItem("复制选中文本");
+            JMenuItem whole = new JMenuItem("复制本条消息");
+            selected.addActionListener(event -> AskPanel.copy(body.getSelectedText()));
+            whole.addActionListener(event -> AskPanel.copy(body.getText()));
+            menu.add(selected); menu.add(whole);
+            body.addMouseListener(new MouseAdapter() {
+                private void show(MouseEvent event) {
+                    if (!event.isPopupTrigger()) return;
+                    selected.setEnabled(body.getSelectedText() != null && !body.getSelectedText().isBlank());
+                    menu.show(body, event.getX(), event.getY());
+                }
+                @Override public void mousePressed(MouseEvent event) { show(event); }
+                @Override public void mouseReleased(MouseEvent event) { show(event); }
+            });
         }
 
         void append(String delta) {

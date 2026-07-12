@@ -1,6 +1,6 @@
 {
   "name": "SimpleRAG example knowledge baseline",
-  "version": 1,
+  "version": 2,
   "minimumRecallAt5": 0.95,
   "minimumMrrAt10": 0.95,
   "minimumNdcgAt10": 0.90,
@@ -10,6 +10,8 @@
     {"id":"code-identifier","query":"request_with_retry TimeoutError","language":"code","expectedDocuments":["retry-and-errors.py"],"expectedPassages":["def request_with_retry"],"mustNotReturn":[],"category":"identifier"},
     {"id":"exact-config-key","query":"DB_USER DB_PASSWORD maximumPoolSize","language":"code","expectedDocuments":["database-connection.md"],"expectedPassages":["DB_PASSWORD"],"mustNotReturn":[],"category":"exact-key"},
     {"id":"semantic-ui","query":"怎样收起左边栏给编辑区域更多空间","language":"zh","expectedDocuments":["ui-navigation.md"],"expectedPassages":["sidebar can be collapsed"],"mustNotReturn":[],"category":"cross-language"},
-    {"id":"negative-secret","query":"Never write an access token to application logs","language":"en","expectedDocuments":["authentication.md"],"expectedPassages":["Never write an access token"],"mustNotReturn":["ui-navigation.md"],"category":"sensitive-negative"}
+    {"id":"negative-secret","query":"Never write an access token to application logs","language":"en","expectedDocuments":["authentication.md"],"expectedPassages":["Never write an access token"],"mustNotReturn":["ui-navigation.md"],"category":"sensitive-negative"},
+    {"id":"code-location-natural","query":"接口超时重试相关代码在哪","language":"zh","expectedDocuments":["retry-and-errors.py"],"expectedPassages":["def request_with_retry"],"mustNotReturn":[],"category":"code-location"},
+    {"id":"code-location-symbol","query":"request_with_retry 定义在哪个文件","language":"mixed","expectedDocuments":["retry-and-errors.py"],"expectedPassages":["def request_with_retry"],"mustNotReturn":[],"category":"code-location"}
   ]
 }
