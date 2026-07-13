@@ -1,12 +1,14 @@
 package com.simplerag.rag;
 
+import com.simplerag.common.text.TextValues;
+
 import java.net.URI;
 
 public record ApiConfig(String baseUrl, String apiKey, String model) {
     public ApiConfig {
-        baseUrl = baseUrl == null ? "" : baseUrl.strip();
-        apiKey = apiKey == null ? "" : apiKey.strip();
-        model = model == null ? "" : model.strip();
+        baseUrl = TextValues.trimToEmpty(baseUrl);
+        apiKey = TextValues.trimToEmpty(apiKey);
+        model = TextValues.trimToEmpty(model);
     }
 
     public String normalizedBaseUrl() {
@@ -33,8 +35,8 @@ public record ApiConfig(String baseUrl, String apiKey, String model) {
         validateForModels();
         URI uri = URI.create(normalizedBaseUrl());
         int port = uri.getPort();
-        return port < 0 ? uri.getHost().toLowerCase(java.util.Locale.ROOT)
-                : uri.getHost().toLowerCase(java.util.Locale.ROOT) + ":" + port;
+        String host = TextValues.normalizedKey(uri.getHost());
+        return port < 0 ? host : host + ":" + port;
     }
 
     public void validateForChat() {

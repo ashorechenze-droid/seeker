@@ -15,5 +15,9 @@
 | reader/chunker/model 变化后错误复用 | 新旧预处理或向量空间不兼容 | entry 版本 + manifest model signature 复用门禁 | planner 版本测试、model version 全量重建测试 |
 | 增量算法改变检索结果 | 复用顺序或片段集合与全量构建不同 | 按当前扫描顺序组装完整 snapshot | `IncrementalIndexTest.incrementalSnapshotMatchesFullRebuild` |
 | 外部变化重建覆盖旧 revision | watcher 只置 DIRTY 时新旧构建文件名相同 | freshness 条件递增 `source_revision`，继续原子发布 | `RuntimeFreshnessTest.failedIncrementalBuildKeepsPreviouslyPublishedRevisionFile` |
+| Common 职责不明确 | 通用代码分散或 Common 退化为杂物目录 | `common.crypto.Digests`、`common.text.TextValues` 与五类职责映射 | `DigestsTest`、`TextValuesTest`、ArchUnit Common 依赖规则 |
+| 敏捷过程只有阶段描述 | 无法从需求追踪到 Sprint 验收和改进行动 | Product Vision、Product Backlog、DoD、Sprint、Review、Retrospective | `docs/agile` 状态与测试/Review 证据 |
 
 完整验收命令：`build-and-test.cmd`。架构规则位于 `ArchitectureTest`，运行态与发布证据位于 `application.runtime`、`consistency` 和 `adapter.out` 测试包。
+
+五类职责映射见 [分层架构说明](architecture/LAYERED_ARCHITECTURE.md)，敏捷过程证据见 [敏捷开发文档](agile/README.md)。

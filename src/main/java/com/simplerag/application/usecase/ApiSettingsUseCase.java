@@ -1,5 +1,6 @@
 package com.simplerag.application.usecase;
 
+import com.simplerag.common.text.TextValues;
 import com.simplerag.application.port.in.ManageApiSettings;
 import com.simplerag.application.port.out.ChatModel;
 import com.simplerag.application.port.out.SecretStore;
@@ -61,7 +62,8 @@ public final class ApiSettingsUseCase implements ManageApiSettings {
 
     @Override public void trustHost(String host) {
         java.util.TreeSet<String> hosts = new java.util.TreeSet<>(trustedHosts());
-        if (host != null && !host.isBlank()) hosts.add(host.strip().toLowerCase(java.util.Locale.ROOT));
+        String normalized = TextValues.normalizedKey(host);
+        if (!normalized.isEmpty()) hosts.add(normalized);
         settings.putSetting(TRUSTED_HOSTS, String.join(",", hosts));
     }
 }

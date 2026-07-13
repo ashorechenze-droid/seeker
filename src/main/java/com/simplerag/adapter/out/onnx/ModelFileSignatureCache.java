@@ -2,9 +2,9 @@ package com.simplerag.adapter.out.onnx;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.simplerag.common.crypto.Digests;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -26,7 +26,7 @@ public final class ModelFileSignatureCache {
     public synchronized String signature(List<Path> files) throws IOException {
         Map<String, Entry> cache = readCache();
         boolean changed = false;
-        MessageDigest combined = digest();
+        MessageDigest combined = Digests.sha256();
         for (Path file : files) {
             if (!Files.isRegularFile(file)) continue;
             Path canonical = file.toRealPath();
@@ -45,7 +45,7 @@ public final class ModelFileSignatureCache {
             combined.update(entry.sha256().getBytes(java.nio.charset.StandardCharsets.US_ASCII));
         }
         if (changed) writeCache(cache);
-        return java.util.HexFormat.of().formatHex(combined.digest());
+        return Digests.hex(combined.digest());
     }
 
     private Map<String, Entry> readCache() {
@@ -73,21 +73,7 @@ public final class ModelFileSignatureCache {
     }
 
     public static String hashFile(Path file) throws IOException {
-        MessageDigest digest = digest();
-        try (InputStream input = Files.newInputStream(file)) {
-            byte[] buffer = new byte[128 * 1024];
-            int read;
-            while ((read = input.read(buffer)) >= 0) if (read > 0) digest.update(buffer, 0, read);
-        }
-        return java.util.HexFormat.of().formatHex(digest.digest());
-    }
-
-    private static MessageDigest digest() {
-        try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (java.security.NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException(impossible);
-        }
+        return Digests.sha256File(file);
     }
 
     public record Entry(long size, long modifiedAt, String fileKey, String sha256) { }

@@ -88,4 +88,13 @@ class ArchitectureTest {
                         "..adapter.out.filesystem..", "..adapter.out.security..")
                 .check(classes);
     }
+
+    @Test
+    void commonIsAJdkOnlyFoundationAndDoesNotDependOnHigherLayers() {
+        noClasses().that().resideInAPackage("..common..")
+                .should().dependOnClassesThat().resideInAnyPackage(
+                        "..adapter..", "..application..", "..bootstrap..", "..evaluation..",
+                        "..model..", "..rag..", "..search..", "..embedding..")
+                .check(classes);
+    }
 }

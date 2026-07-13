@@ -1,5 +1,7 @@
 package com.simplerag.application.conversation;
 
+import com.simplerag.common.text.TextValues;
+
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -24,7 +26,7 @@ public final class ConversationStore {
 
     public ConversationSession openOrReplace(String knowledgeBaseId, long sourceRevision) {
         Objects.requireNonNull(knowledgeBaseId, "knowledgeBaseId");
-        String key = knowledgeBaseId.strip();
+        String key = TextValues.trimToEmpty(knowledgeBaseId);
         return sessions.compute(key, (ignored, existing) -> {
             if (existing != null && existing.matches(key, sourceRevision)) {
                 return existing;
@@ -37,7 +39,7 @@ public final class ConversationStore {
         if (knowledgeBaseId == null) {
             return Optional.empty();
         }
-        return Optional.ofNullable(sessions.get(knowledgeBaseId.strip()));
+        return Optional.ofNullable(sessions.get(TextValues.trimToEmpty(knowledgeBaseId)));
     }
 
     public ConversationSession requireMatching(String knowledgeBaseId, long sourceRevision) {
@@ -52,7 +54,7 @@ public final class ConversationStore {
         if (knowledgeBaseId == null) {
             return;
         }
-        sessions.remove(knowledgeBaseId.strip());
+        sessions.remove(TextValues.trimToEmpty(knowledgeBaseId));
     }
 
     public void clearAll() {

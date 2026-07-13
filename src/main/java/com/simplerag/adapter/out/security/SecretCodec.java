@@ -1,10 +1,11 @@
 package com.simplerag.adapter.out.security;
 
+import com.simplerag.common.crypto.Digests;
+
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Base64;
@@ -46,7 +47,7 @@ public final class SecretCodec implements com.simplerag.application.port.out.Sec
     private static SecretKeySpec key() throws Exception {
         String material = System.getProperty("user.name", "") + "|"
                 + System.getProperty("user.home", "") + "|SimpleRAG-local-secret-v1";
-        byte[] digest = MessageDigest.getInstance("SHA-256").digest(material.getBytes(StandardCharsets.UTF_8));
+        byte[] digest = Digests.sha256Utf8(material);
         return new SecretKeySpec(Arrays.copyOf(digest, 16), "AES");
     }
 }

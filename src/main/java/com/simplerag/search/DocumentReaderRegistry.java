@@ -1,5 +1,6 @@
 package com.simplerag.search;
 
+import com.simplerag.common.text.TextValues;
 import com.simplerag.search.reader.DocxDocumentReader;
 import com.simplerag.search.reader.HtmlDocumentReader;
 import com.simplerag.search.reader.PdfDocumentReader;
@@ -12,7 +13,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -32,10 +32,10 @@ public final class DocumentReaderRegistry {
 
     private void register(DocumentReader reader) {
         for (String extension : reader.extensions()) {
-            putUnique(byExtension, extension.toLowerCase(Locale.ROOT), reader);
+            putUnique(byExtension, TextValues.normalizedKey(extension), reader);
         }
         for (String fileName : reader.fileNames()) {
-            putUnique(byFileName, fileName.toLowerCase(Locale.ROOT), reader);
+            putUnique(byFileName, TextValues.normalizedKey(fileName), reader);
         }
     }
 
@@ -59,7 +59,7 @@ public final class DocumentReaderRegistry {
     }
 
     private Optional<DocumentReader> find(Path path) {
-        String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+        String name = TextValues.normalizedKey(path.getFileName().toString());
         DocumentReader exact = byFileName.get(name);
         if (exact != null) return Optional.of(exact);
         int dot = name.lastIndexOf('.');

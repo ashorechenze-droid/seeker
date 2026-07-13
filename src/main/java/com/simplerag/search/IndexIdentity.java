@@ -1,10 +1,11 @@
 package com.simplerag.search;
 
+import com.simplerag.common.crypto.Digests;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.List;
 import java.nio.file.Files;
 import java.util.Set;
@@ -21,7 +22,7 @@ public final class IndexIdentity {
 
     public static String sourceSetHash(List<Path> sources) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            MessageDigest digest = Digests.sha256();
             for (Path source : sources.stream().map(Path::toAbsolutePath).map(Path::normalize)
                     .sorted(Comparator.comparing(Path::toString)).toList()) {
                 update(digest, source.toString());
@@ -48,7 +49,7 @@ public final class IndexIdentity {
                     }
                 }
             }
-            return HexFormat.of().formatHex(digest.digest());
+            return Digests.hex(digest.digest());
         } catch (Exception impossible) {
             throw new IllegalStateException("无法计算数据源签名", impossible);
         }

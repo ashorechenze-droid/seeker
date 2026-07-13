@@ -254,7 +254,7 @@ SemanticHighlightService
 
 SQLite output ports 已按知识库、数据源、发布、freshness 和设置拆分，但共享 `SqliteTransactionManager`，因此接口隔离不会拆散跨表事务。
 
-架构决策见 [docs/adr](docs/adr)，结构稳定化与增量索引的需求、实现和测试映射见 [需求追踪矩阵](docs/REQUIREMENTS_TRACEABILITY.md)。
+架构决策见 [docs/adr](docs/adr)，UI/BLL/DAL/Model/Common 的职责映射见 [分层架构说明](docs/architecture/LAYERED_ARCHITECTURE.md)，结构稳定化与增量索引的需求、实现和测试映射见 [需求追踪矩阵](docs/REQUIREMENTS_TRACEABILITY.md)，Sprint、Backlog、Review 与 Retrospective 见 [敏捷开发证据](docs/agile/README.md)。
 
 ## 构建与测试
 
