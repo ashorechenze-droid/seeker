@@ -1,0 +1,41 @@
+﻿@startuml
+start
+:选择当前知识库并触发重建;
+:捕获 knowledgeBaseId、sourceRevision、\nsourceSetHash 和 modelSignature;
+:条件更新状态为 BUILDING;
+:扫描当前文件并计算 FileFingerprint;
+:读取上一已发布 snapshot;
+if (模型、reader 和 chunker\n满足复用条件?) then (是)
+  :规划 added、modified、deleted、reused;
+  :复用未变化文件的 chunks/embeddings;
+else (否)
+  :扩大重建范围或执行全量重建;
+endif
+:读取、分块并向量化新增/修改文件;
+:单文件失败时记录 warning 并继续;
+:按当前扫描结果组装完整 snapshot;
+:再次计算 sourceSetHash;
+if (构建期间源集合发生变化?) then (是)
+  :拒绝发布并清理临时文件;
+  :状态回到 DIRTY;
+  stop
+else (否)
+  :写入 <revision>.bin.tmp 并关闭文件;
+endif
+if (ATOMIC_MOVE 成功?) then (是)
+  :发布为 <revision>.bin;
+else (否)
+  :记录 FAILED，保留旧发布版本;
+  stop
+endif
+if (SQLite 条件发布成功?) then (是)
+  :写 knowledge_index 并更新发布指针;
+  :事务提交后替换活动 IndexHandle;
+  :启动新 freshness monitor session;
+  :状态变为 READY;
+else (否)
+  :删除过期的新 revision 文件;
+  :保留旧发布版本并标记 DIRTY/FAILED;
+endif
+stop
+@enduml

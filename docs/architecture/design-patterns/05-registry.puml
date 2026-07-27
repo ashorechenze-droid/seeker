@@ -1,0 +1,76 @@
+﻿@startuml
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam class {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+  ArrowColor #475569
+}
+skinparam interface {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+}
+title SimpleRAG - Registry 模式（DocumentReader 注册与选择）
+left to right direction
+
+class DocumentScanner <<Client>> {
+  +scan(sourceRoots, readers) : ScanResult
+}
+
+class IncrementalIndexBuilder <<Client>> {
+  -readers : DocumentReaderRegistry
+  +build(request, progress) : IndexReport
+}
+
+class DocumentReaderRegistry <<Registry>> {
+  -byExtension : Map<String, DocumentReader>
+  -byFileName : Map<String, DocumentReader>
+  +DocumentReaderRegistry(readers : List<DocumentReader>)
+  -register(reader : DocumentReader) : void
+  -find(path : Path) : Optional<DocumentReader>
+  -putUnique(target, key, reader) : void
+  +canRead(path : Path, size : long) : boolean
+  +descriptor(path : Path) : Optional<ReaderDescriptor>
+  +read(file : Path, root : Path) : ReadDocument
+}
+
+interface DocumentReader <<Registered Service>> {
+  +id() : String
+  +version() : int
+  +extensions() : Set<String>
+  +fileNames() : Set<String>
+  +maxFileSizeBytes() : long
+  +read(file, root) : ReadDocument
+}
+
+class ReaderDescriptor <<Value Object>> {
+  +id : String
+  +version : int
+  +maxFileSizeBytes : long
+}
+
+class PlainTextDocumentReader
+class PdfDocumentReader
+class DocxDocumentReader
+class PptxDocumentReader
+class XlsxDocumentReader
+class HtmlDocumentReader
+
+DocumentScanner --> DocumentReaderRegistry : descriptor()
+IncrementalIndexBuilder --> DocumentReaderRegistry : read()
+DocumentReaderRegistry ..> ReaderDescriptor : creates
+DocumentReaderRegistry "1" o-- "1..*" DocumentReader : indexes by key
+PlainTextDocumentReader ..|> DocumentReader
+PdfDocumentReader ..|> DocumentReader
+DocxDocumentReader ..|> DocumentReader
+PptxDocumentReader ..|> DocumentReader
+XlsxDocumentReader ..|> DocumentReader
+HtmlDocumentReader ..|> DocumentReader
+
+note bottom of DocumentReaderRegistry
+  Exact file name has priority over extension.
+  Duplicate keys are rejected during registration.
+end note
+@enduml

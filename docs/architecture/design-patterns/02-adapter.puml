@@ -1,0 +1,62 @@
+﻿@startuml
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam class {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+  ArrowColor #475569
+}
+skinparam interface {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+}
+title SimpleRAG - Adapter 模式（OpenAI 兼容聊天模型）
+left to right direction
+
+class AskUseCase <<Client>> {
+  -chat : ChatModel
+  +askStream(..., config : ApiConfig, onDelta) : AskResultView
+}
+
+interface ChatModel <<Target>> {
+  +listModels(config : ApiConfig) : List<String>
+  +answer(config : ApiConfig, request : ChatRequest) : RagAnswer
+  +answerStream(config : ApiConfig, request : ChatRequest, onDelta) : RagAnswer
+}
+
+class OpenAiCompatibleClient <<Adapter>> {
+  -httpClient : HttpClient
+  -json : ObjectMapper
+  -diagnostics : DiagnosticSink
+  +listModels(config : ApiConfig) : List<String>
+  +answer(config : ApiConfig, request : ChatRequest) : RagAnswer
+  +answerStream(config : ApiConfig, request : ChatRequest, onDelta) : RagAnswer
+  -chatPayload(config, request, stream) : ObjectNode
+  -send(request : HttpRequest) : JsonNode
+}
+
+class "java.net.http.HttpClient" as HttpClient <<Adaptee>> {
+  +send(request, bodyHandler) : HttpResponse
+}
+
+class "OpenAI-compatible HTTP API" as RemoteApi <<External System>>
+class ApiConfig <<Value Object>>
+class ChatRequest <<DTO>>
+class RagAnswer <<Domain Result>>
+
+AskUseCase --> ChatModel : uses target contract
+OpenAiCompatibleClient ..|> ChatModel
+OpenAiCompatibleClient *-- HttpClient
+OpenAiCompatibleClient ..> ApiConfig
+OpenAiCompatibleClient ..> ChatRequest
+OpenAiCompatibleClient ..> RagAnswer : creates
+HttpClient ..> RemoteApi : HTTPS / JSON / SSE
+
+note bottom of OpenAiCompatibleClient
+  Converts domain ChatRequest and ApiConfig
+  to OpenAI-compatible HTTP requests, then
+  converts JSON/SSE responses to RagAnswer.
+end note
+@enduml

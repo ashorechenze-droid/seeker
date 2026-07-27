@@ -1,0 +1,112 @@
+﻿@startuml
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam class {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+  ArrowColor #475569
+}
+skinparam interface {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+}
+title SimpleRAG - Composition Root / Dependency Injection（组合根与依赖注入）
+left to right direction
+
+class App <<Entry Point>> {
+  +main(args : String[]) : void
+}
+
+class AppCompositionRoot <<Composition Root>> {
+  +start() : void
+}
+
+package "Output Ports" {
+  interface TextEmbedder
+  interface EmbeddingProvider
+  interface ChatModel
+  interface KnowledgeBaseRepository
+  interface SettingsRepository
+  interface SecretStore
+  interface IndexRepository
+  interface SourceFreshnessMonitor
+}
+
+package "Concrete Adapters" {
+  class Langchain4jOnnxEmbeddingProvider
+  class OpenAiCompatibleClient
+  class AppRepository
+  class WindowsCredentialManagerSecretStore
+  class FileSystemIndexRepository
+  class FileSystemSourceFreshnessMonitor
+}
+
+package "Application Object Graph" {
+  class KnowledgeService
+  class ActiveKnowledgeRuntime
+  class KnowledgeBaseUseCases
+  class KnowledgeSourceUseCases
+  class IndexBuildUseCase
+  class SearchUseCase
+  class AskUseCase
+  class ApiSettingsUseCase
+}
+
+package "UI" {
+  class KnowledgeController
+  class SearchController
+  class AskController
+  class MainFrame
+}
+
+App ..> AppCompositionRoot : new / start
+TextEmbedder <|-- EmbeddingProvider
+Langchain4jOnnxEmbeddingProvider ..|> EmbeddingProvider
+OpenAiCompatibleClient ..|> ChatModel
+AppRepository ..|> KnowledgeBaseRepository
+AppRepository ..|> SettingsRepository
+WindowsCredentialManagerSecretStore ..|> SecretStore
+FileSystemIndexRepository ..|> IndexRepository
+FileSystemSourceFreshnessMonitor ..|> SourceFreshnessMonitor
+
+AppCompositionRoot ..> Langchain4jOnnxEmbeddingProvider : <<create>>
+AppCompositionRoot ..> OpenAiCompatibleClient : <<create>>
+AppCompositionRoot ..> AppRepository : <<create>>
+AppCompositionRoot ..> WindowsCredentialManagerSecretStore : <<create>>
+AppCompositionRoot ..> FileSystemIndexRepository : <<create>>
+AppCompositionRoot ..> FileSystemSourceFreshnessMonitor : <<create>>
+AppCompositionRoot ..> ActiveKnowledgeRuntime : <<create>>
+AppCompositionRoot ..> KnowledgeService : <<create + inject>>
+AppCompositionRoot ..> KnowledgeBaseUseCases : <<create + inject>>
+AppCompositionRoot ..> KnowledgeSourceUseCases : <<create + inject>>
+AppCompositionRoot ..> IndexBuildUseCase : <<create + inject>>
+AppCompositionRoot ..> SearchUseCase : <<create + inject>>
+AppCompositionRoot ..> AskUseCase : <<create + inject>>
+AppCompositionRoot ..> ApiSettingsUseCase : <<create + inject>>
+AppCompositionRoot ..> KnowledgeController : <<create + inject>>
+AppCompositionRoot ..> SearchController : <<create + inject>>
+AppCompositionRoot ..> AskController : <<create + inject>>
+AppCompositionRoot ..> MainFrame : <<create + inject>>
+
+KnowledgeService --> TextEmbedder
+KnowledgeService --> KnowledgeBaseRepository
+KnowledgeService --> SettingsRepository
+KnowledgeService ..> SecretStore : constructor dependency
+KnowledgeService --> ChatModel
+KnowledgeService --> IndexRepository
+KnowledgeService --> SourceFreshnessMonitor
+KnowledgeService --> ActiveKnowledgeRuntime
+SearchUseCase --> ActiveKnowledgeRuntime
+AskUseCase --> ChatModel
+MainFrame *-- KnowledgeController
+MainFrame *-- SearchController
+MainFrame *-- AskController
+
+note bottom of AppCompositionRoot
+  All concrete type selection and constructor wiring
+  is centralized here; application classes receive
+  dependencies through constructors.
+end note
+@enduml

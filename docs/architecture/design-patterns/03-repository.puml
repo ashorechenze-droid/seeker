@@ -1,0 +1,102 @@
+﻿@startuml
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam class {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+  ArrowColor #475569
+}
+skinparam interface {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+}
+title SimpleRAG - Repository 模式（SQLite 持久化）
+left to right direction
+
+class KnowledgeService <<Client / Application Service>> {
+  -knowledgeBases : KnowledgeBaseRepository
+  -sources : KnowledgeSourceRepository
+  -publications : IndexPublicationRepository
+  -freshnessRecords : FreshnessRepository
+  -settings : SettingsRepository
+}
+
+interface KnowledgeSourceRepository <<Repository Port>> {
+  +listSources(knowledgeBaseId) : List<Path>
+  +addSource(knowledgeBaseId, path) : void
+  +removeSource(knowledgeBaseId, path) : void
+}
+
+interface IndexPublicationRepository <<Repository Port>> {
+  +beginIndexBuild(knowledgeBaseId, revision) : boolean
+  +markIndexBuildFailed(knowledgeBaseId, revision, error) : void
+  +publishIndex(manifest, fileName) : boolean
+  +findIndexFile(knowledgeBaseId, revision) : Optional<String>
+}
+
+interface FreshnessRepository <<Repository Port>> {
+  +markIndexDirtyIfCurrent(...) : boolean
+  +recordSourceVerification(...) : void
+}
+
+interface KnowledgeBaseRepository <<Aggregate Repository Port>> {
+  +listKnowledgeBases() : List<KnowledgeBase>
+  +findKnowledgeBase(id) : Optional<KnowledgeBase>
+  +createKnowledgeBase(name, description) : KnowledgeBase
+  +updateKnowledgeBase(id, name, description) : KnowledgeBase
+  +deleteKnowledgeBase(id) : void
+}
+
+interface SettingsRepository <<Repository Port>> {
+  +getSetting(key) : Optional<String>
+  +putSetting(key, value) : void
+}
+
+class AppRepository <<SQLite Repository>> {
+  -database : DatabaseManager
+  -transactions : SqliteTransactionManager
+  +listKnowledgeBases() : List<KnowledgeBase>
+  +findKnowledgeBase(id) : Optional<KnowledgeBase>
+  +createKnowledgeBase(name, description) : KnowledgeBase
+  +listSources(knowledgeBaseId) : List<Path>
+  +publishIndex(manifest, fileName) : boolean
+  +getSetting(key) : Optional<String>
+  +putSetting(key, value) : void
+}
+
+class DatabaseManager <<Data Source>> {
+  -databasePath : Path
+  +connect() : Connection
+  +path() : Path
+}
+
+class SqliteTransactionManager <<Unit of Work Helper>> {
+  -database : DatabaseManager
+  +execute(failureMessage, work) : T
+}
+
+class KnowledgeBase <<Domain Entity>>
+class IndexManifest <<Domain Value>>
+class "SQLite Database" as SQLite <<Database>>
+
+KnowledgeSourceRepository <|-- KnowledgeBaseRepository
+IndexPublicationRepository <|-- KnowledgeBaseRepository
+FreshnessRepository <|-- KnowledgeBaseRepository
+AppRepository ..|> KnowledgeBaseRepository
+AppRepository ..|> SettingsRepository
+
+KnowledgeService --> KnowledgeBaseRepository
+KnowledgeService --> KnowledgeSourceRepository
+KnowledgeService --> IndexPublicationRepository
+KnowledgeService --> FreshnessRepository
+KnowledgeService --> SettingsRepository
+
+AppRepository *-- SqliteTransactionManager
+AppRepository --> DatabaseManager
+SqliteTransactionManager --> DatabaseManager
+DatabaseManager ..> SQLite : JDBC
+AppRepository ..> KnowledgeBase : maps rows
+AppRepository ..> IndexManifest : persists publication
+@enduml

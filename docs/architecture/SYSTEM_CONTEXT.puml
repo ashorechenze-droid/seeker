@@ -1,0 +1,29 @@
+﻿@startuml
+left to right direction
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+actor "本地用户" as User
+folder "本地数据源目录" as Sources
+database "SQLite\nsimplerag.db" as DB
+artifact "版本化索引文件\n<knowledgeBaseId>/<revision>.bin" as IndexFiles
+artifact "本地多语言\nONNX 模型" as Model
+component "Windows Credential\nManager" as Credential
+cloud "OpenAI-compatible\n服务" as Remote
+
+rectangle "SimpleRAG 本地知识库客户端" {
+    component "Swing 桌面界面" as UI
+    component "应用用例与\n活动运行态" as Application
+    component "检索、分块与\n索引领域能力" as Domain
+    UI --> Application
+    Application --> Domain
+}
+
+User --> UI : 管理、检索、问答、诊断
+Sources --> Application : 文件内容与变化事件
+Application --> DB : 配置、revision、状态与发布记录
+Domain --> IndexFiles : 读取/原子发布 snapshot
+Domain --> Model : 本地 embedding 推理
+Application --> Credential : 保存/读取 API Key
+Application --> Remote : models/chat 请求\n仅发送确认后的本轮片段
+@enduml

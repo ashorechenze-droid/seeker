@@ -1,0 +1,62 @@
+﻿@startuml
+hide methods
+skinparam linetype ortho
+
+entity "knowledge_base" as KB {
+  * id : TEXT <<PK>>
+  --
+  name : TEXT
+  description : TEXT
+  source_revision : INTEGER
+  published_index_revision : INTEGER?
+  index_status : TEXT
+  last_index_error : TEXT
+  last_verified_source_hash : TEXT
+  last_verified_at : INTEGER?
+  freshness_reason : TEXT
+}
+
+entity "knowledge_source" as KS {
+  * id : INTEGER <<PK>>
+  --
+  knowledge_base_id : TEXT <<FK>>
+  path : TEXT
+  UNIQUE(knowledge_base_id, path)
+}
+
+entity "knowledge_index" as KI {
+  * knowledge_base_id : TEXT <<PK,FK>>
+  * revision : INTEGER <<PK>>
+  --
+  file_name : TEXT
+  source_set_hash : TEXT
+  embedding_model_signature : TEXT
+  embedding_dimension : INTEGER
+  chunking_version : INTEGER
+  index_format_version : INTEGER
+  built_at : INTEGER
+}
+
+entity "app_setting" as SETTING {
+  * setting_key : TEXT <<PK>>
+  --
+  setting_value : TEXT
+}
+
+entity "IndexSnapshot v5（磁盘文件）" as SNAPSHOT {
+  IndexManifest
+  DocumentIndexEntry[*]
+  DocumentChunk[*]
+  lexical features
+  embeddings
+}
+
+entity "Windows Credential Manager\n<<external secret store>>" as CRED
+entity "ConversationStore / DiagnosticLog\n<<in-memory>>" as MEMORY
+
+KB ||--o{ KS : 配置数据源
+KB ||--o{ KI : 保留版本化发布记录
+KI ||--|| SNAPSHOT : file_name 指向
+SETTING ..> CRED : wincred marker 指向秘密值
+KB ..> MEMORY : 当前 revision 绑定会话和诊断
+@enduml

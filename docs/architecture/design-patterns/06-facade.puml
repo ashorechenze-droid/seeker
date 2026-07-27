@@ -1,0 +1,82 @@
+﻿@startuml
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam class {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+  ArrowColor #475569
+}
+skinparam interface {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+}
+title SimpleRAG - Facade 模式（KnowledgeService 应用门面）
+left to right direction
+
+package "Clients" {
+  class KnowledgeBaseUseCases <<Client>>
+  class KnowledgeSourceUseCases <<Client>>
+  class IndexBuildUseCase <<Client>>
+  class DesktopQueryService <<Client>>
+}
+
+package "Facade API" {
+  interface ManageKnowledgeBases
+  interface ManageKnowledgeSources
+  interface RebuildKnowledgeIndex
+  interface SearchKnowledge
+  interface AskKnowledge
+  interface ManageApiSettings
+  interface DesktopReadModel
+}
+
+class KnowledgeService <<Facade>> {
+  +restore() : boolean
+  +knowledgeBases() : List<KnowledgeBase>
+  +createKnowledgeBase(name, description) : KnowledgeBase
+  +addSource(path) : void
+  +rebuildCurrent(progress) : IndexBuildResult
+  +search(query, limit, extension) : List<SearchResultView>
+  +askStream(...) : AskResultView
+  +apiConfig() : ApiConfig
+  +stats() : KnowledgeStats
+  +close() : void
+}
+
+package "Subsystems" {
+  interface KnowledgeBaseRepository
+  interface IndexPublicationRepository
+  interface IndexRepository
+  interface TextEmbedder
+  interface ChatModel
+  interface SourceFreshnessMonitor
+  class ActiveKnowledgeRuntime
+  class FreshnessGate
+  class ApiSettingsUseCase
+}
+
+KnowledgeBaseUseCases --> ManageKnowledgeBases
+KnowledgeSourceUseCases --> ManageKnowledgeSources
+IndexBuildUseCase --> RebuildKnowledgeIndex
+DesktopQueryService --> DesktopReadModel
+
+KnowledgeService ..|> ManageKnowledgeBases
+KnowledgeService ..|> ManageKnowledgeSources
+KnowledgeService ..|> RebuildKnowledgeIndex
+KnowledgeService ..|> SearchKnowledge
+KnowledgeService ..|> AskKnowledge
+KnowledgeService ..|> ManageApiSettings
+KnowledgeService ..|> DesktopReadModel
+
+KnowledgeService --> KnowledgeBaseRepository
+KnowledgeService --> IndexPublicationRepository
+KnowledgeService --> IndexRepository
+KnowledgeService --> TextEmbedder
+KnowledgeService --> ChatModel
+KnowledgeService --> SourceFreshnessMonitor
+KnowledgeService *-- FreshnessGate
+KnowledgeService *-- ApiSettingsUseCase
+KnowledgeService --> ActiveKnowledgeRuntime
+@enduml
