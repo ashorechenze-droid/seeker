@@ -1,6 +1,7 @@
 package com.simplerag.search;
 
 import java.io.IOException;
+import java.io.ObjectInputFilter;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.file.Files;
@@ -10,6 +11,22 @@ import java.nio.file.StandardCopyOption;
 import java.util.Optional;
 
 public final class IndexStore {
+    /**
+     * Deserialization allowlist for index snapshots.
+     *
+     * <p>Snapshot files live under the user profile, so a replaced or planted {@code .bin} would
+     * otherwise be handed to an unrestricted {@code readObject}. The trailing {@code !*} rejects every
+     * class outside the snapshot's own object graph, which is what blocks third-party gadget chains
+     * (POI, PDFBox, commons-*) from ever being instantiated. The depth, reference and array bounds cap
+     * resource exhaustion from a hand-crafted stream.
+     */
+    private static final String ALLOWED_CLASSES =
+            "maxdepth=64;maxrefs=20000000;maxarray=20000000;"
+                    + "com.simplerag.search.*;com.simplerag.model.*;"
+                    + "java.util.*;java.lang.*;"
+                    + "[F;[B;[J;[I;[Ljava.lang.Object;[Ljava.lang.String;"
+                    + "!*";
+
     private final Path indexPath;
     private final boolean versioned;
 
@@ -42,7 +59,16 @@ public final class IndexStore {
         if (!Files.isRegularFile(path)) {
             return Optional.empty();
         }
+        ObjectInputFilter filter;
+        try {
+            // Built outside the read so a malformed pattern fails loudly instead of silently
+            // disabling every index load.
+            filter = snapshotFilter(Files.size(path));
+        } catch (IOException unreadable) {
+            return Optional.empty();
+        }
         try (ObjectInputStream input = new ObjectInputStream(Files.newInputStream(path))) {
+            input.setObjectInputFilter(filter);
             Object value = input.readObject();
             if (value instanceof IndexSnapshot snapshot) {
                 if (snapshot.version() == IndexSnapshot.CURRENT_VERSION) {
@@ -53,10 +79,15 @@ public final class IndexStore {
                             snapshot.chunks(), snapshot.indexedAt(), "", null));
                 }
             }
-        } catch (IOException | ClassNotFoundException ignored) {
-            // A corrupt or old cache should never prevent the application from starting.
+        } catch (IOException | ClassNotFoundException | RuntimeException ignored) {
+            // A corrupt, rejected or old cache should never prevent the application from starting.
+            // Returning empty makes the caller treat the index as missing and require a rebuild.
         }
         return Optional.empty();
+    }
+
+    private static ObjectInputFilter snapshotFilter(long maxBytes) {
+        return ObjectInputFilter.Config.createFilter("maxbytes=" + Math.max(1, maxBytes) + ";" + ALLOWED_CLASSES);
     }
 
     public void save(IndexSnapshot snapshot) throws IOException {

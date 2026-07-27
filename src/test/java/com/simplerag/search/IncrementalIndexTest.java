@@ -1,6 +1,7 @@
 package com.simplerag.search;
 
 import com.simplerag.application.port.out.TextEmbedder;
+import com.simplerag.common.crypto.Digests;
 import com.simplerag.model.DocumentChunk;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -10,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.Callable;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -133,6 +135,66 @@ class IncrementalIndexTest {
         List<DocumentChunk> actual = sortedChunks(incremental);
         assertEquals(expected.size(), actual.size());
         for (int i = 0; i < expected.size(); i++) assertChunkEquals(expected.get(i), actual.get(i));
+    }
+
+    @Test
+    void parallelReadingProducesTheSameSnapshotAsSequentialReading() throws Exception {
+        Path source = Files.createDirectory(temporaryDirectory.resolve("parallel-source"));
+        for (int index = 0; index < 24; index++) {
+            Files.writeString(source.resolve("doc-" + index + ".txt"),
+                    "document " + index + " carries enough stable text to produce at least one chunk");
+        }
+
+        IndexSnapshot sequential = withProperty(IncrementalIndexBuilder.READ_THREADS_PROPERTY, "1",
+                () -> buildSnapshot(source, new CountingEmbedder("model-a"), null, 1));
+        IndexSnapshot parallel = withProperty(IncrementalIndexBuilder.READ_THREADS_PROPERTY, "8",
+                () -> buildSnapshot(source, new CountingEmbedder("model-a"), null, 1));
+
+        assertEquals(sequential.documentEntries(), parallel.documentEntries(),
+                "并行读取不得改变文件条目的顺序或内容");
+        assertEquals(sequential.chunks().stream().map(DocumentChunk::id).toList(),
+                parallel.chunks().stream().map(DocumentChunk::id).toList(),
+                "chunk 顺序必须与串行读取逐位一致");
+        for (int index = 0; index < sequential.chunks().size(); index++) {
+            assertChunkEquals(sequential.chunks().get(index), parallel.chunks().get(index));
+        }
+    }
+
+    @Test
+    void contentHashFastPathAgreesWithFullVerification() throws Exception {
+        Path source = Files.createDirectory(temporaryDirectory.resolve("hash-source"));
+        Path stable = source.resolve("stable.txt");
+        Path changing = source.resolve("changing.txt");
+        Files.writeString(stable, "unchanged document keeps its published content hash");
+        Files.writeString(changing, "first revision of the changing document with enough text");
+        IndexSnapshot first = buildSnapshot(source, new CountingEmbedder("model-a"), null, 1);
+        Files.writeString(changing, "second revision of the changing document with different text");
+
+        IndexSnapshot verified = withProperty(FileFingerprint.VERIFY_CONTENT_HASH_PROPERTY, "true",
+                () -> buildSnapshot(source, new CountingEmbedder("model-a"), first, 2));
+        IndexSnapshot fastPath = buildSnapshot(source, new CountingEmbedder("model-a"), first, 2);
+
+        assertEquals(sortedEntries(verified), sortedEntries(fastPath),
+                "size+mtime 快路径与全量哈希必须得到相同的文件条目");
+        assertEquals(Digests.sha256File(stable), contentHash(fastPath, "stable.txt"),
+                "复用的哈希必须仍然是该文件真实的 SHA-256");
+        assertEquals(Digests.sha256File(changing), contentHash(fastPath, "changing.txt"));
+    }
+
+    private static String contentHash(IndexSnapshot snapshot, String relativePath) {
+        return snapshot.documentEntries().stream()
+                .filter(entry -> entry.relativePath().equals(relativePath))
+                .map(DocumentIndexEntry::contentHash).findFirst().orElseThrow();
+    }
+
+    private static <T> T withProperty(String key, String value, Callable<T> action) throws Exception {
+        String previous = System.getProperty(key);
+        System.setProperty(key, value);
+        try {
+            return action.call();
+        } finally {
+            if (previous == null) System.clearProperty(key); else System.setProperty(key, previous);
+        }
     }
 
     private IndexSnapshot buildSnapshot(Path source, CountingEmbedder embedder,

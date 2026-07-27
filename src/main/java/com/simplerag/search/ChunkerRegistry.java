@@ -16,7 +16,9 @@ public final class ChunkerRegistry {
     private static final Set<String> CODE_EXTENSIONS = Set.of(
             "java", "kt", "kts", "py", "js", "jsx", "ts", "tsx", "go", "rs", "c", "h",
             "cpp", "hpp", "cs", "php", "rb", "swift", "scala", "sql", "sh", "bash", "ps1",
-            "bat", "cmd", "css", "scss", "vue", "svelte");
+            "bat", "cmd", "css", "scss", "vue", "svelte",
+            "lua", "r", "pl", "pm", "ex", "exs", "erl", "dart", "groovy",
+            "proto", "graphql", "gql", "tf", "tfvars", "hcl");
 
     public List<DocumentChunk> chunk(ReadDocument document) {
         List<DocumentChunk> chunks = new ArrayList<>();

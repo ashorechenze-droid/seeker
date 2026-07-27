@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -134,6 +135,39 @@ class DocumentReaderTest {
         assertEquals(1, report.warnings().stream().filter(IndexBuildWarning::skipped).count());
         assertTrue(report.warnings().get(0).message().contains("PDF"));
         assertTrue(engine.snapshot().chunks().stream().anyMatch(chunk -> chunk.fileName().equals("good.txt")));
+    }
+
+    @Test
+    void stripsByteOrderMarksAndReadsUtf16Documents() throws Exception {
+        Path utf8WithBom = temporaryDirectory.resolve("signed.md");
+        Files.write(utf8WithBom, concat(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF},
+                "SimpleRAG 支持带签名的 UTF-8 文档。".getBytes(StandardCharsets.UTF_8)));
+
+        Path utf16BigEndian = temporaryDirectory.resolve("wide-be.txt");
+        Files.write(utf16BigEndian, "配置项 timeout 定义在部署文档中。".getBytes(StandardCharsets.UTF_16));
+
+        Path utf16LittleEndian = temporaryDirectory.resolve("wide-le.txt");
+        Files.write(utf16LittleEndian, concat(new byte[]{(byte) 0xFF, (byte) 0xFE},
+                "回滚步骤记录在运维手册第三节。".getBytes(StandardCharsets.UTF_16LE)));
+
+        List<DocumentChunk> signed = chunkers.chunk(readers.read(utf8WithBom, temporaryDirectory));
+        List<DocumentChunk> bigEndian = chunkers.chunk(readers.read(utf16BigEndian, temporaryDirectory));
+        List<DocumentChunk> littleEndian = chunkers.chunk(readers.read(utf16LittleEndian, temporaryDirectory));
+
+        assertFalse(signed.isEmpty());
+        assertFalse(signed.get(0).content().startsWith("﻿"), "BOM 不能残留进首个词法单元");
+        assertTrue(signed.get(0).content().startsWith("SimpleRAG"));
+        assertTrue(bigEndian.stream().anyMatch(chunk -> chunk.content().contains("定义在部署文档中")),
+                "带 BOM 的 UTF-16BE 文档不应被当作二进制丢弃");
+        assertTrue(littleEndian.stream().anyMatch(chunk -> chunk.content().contains("运维手册第三节")),
+                "带 BOM 的 UTF-16LE 文档不应被当作二进制丢弃");
+    }
+
+    private static byte[] concat(byte[] prefix, byte[] body) {
+        byte[] result = new byte[prefix.length + body.length];
+        System.arraycopy(prefix, 0, result, 0, prefix.length);
+        System.arraycopy(body, 0, result, prefix.length, body.length);
+        return result;
     }
 
     private static final class DisabledEmbedder implements TextEmbedder {

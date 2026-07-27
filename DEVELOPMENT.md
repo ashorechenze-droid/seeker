@@ -387,6 +387,13 @@ mvn.cmd -q test
 - 模型、reader 或 chunker 版本变化时，planner 自动把必要文件归入 modified。
 - 同一文件集合的增量构建与全量构建产生等价 entries、chunks 和 embeddings。
 - 增量 embedding 失败时，旧 published revision 和旧 revision 文件保持不变。
+- 索引快照反序列化拒绝对象图之外的类，且在其 `readObject` 执行前拒绝。
+- 凭据文件与凭据目录不进入索引，并逐条上报为已跳过。
+- 嵌套数据源被折叠，同一文件不会被索引两次。
+- 扫描文件数与目录深度触顶时停止遍历并显式上报，不静默截断。
+- 并行读取与串行读取产生逐位一致的 chunk 顺序与文件条目。
+- size/mtime 哈希快路径与强制全量校验产生相同的文件条目。
+- 带 BOM 的 UTF-8 与 UTF-16LE/BE 文档被正确解码，而非当作二进制丢弃。
 
 另有纯应用层测试使用内存 repository、内存 index repository、fake embedder、fake chat model 和 fake secret store 运行完整重建与问答用例，不启动 Swing、SQLite、ONNX 或 HTTP 服务。多轮对话模块由 `ConversationModulesTest` 覆盖 revision 绑定、token/轮次裁剪与请求不可变性；`AskPanelTest` 覆盖问答页独立构造。
 该组测试还注入索引保存失败和数据库发布失败，验证两类故障都不会移动已发布 revision 或替换活动索引。
@@ -474,11 +481,11 @@ SettingsRepository
 
 ### 16.1 文件级身份与纯规划策略
 
-`FileFingerprint` 对每个受支持文件计算最终 SHA-256 身份；`DocumentIndexEntry` 把该身份、reader/chunker 版本与已发布 chunk IDs 绑定。`IncrementalIndexPlanner` 不访问文件系统、数据库或 embedding adapter，只比较上一 entries 与当前 fingerprints，输出 `added/modified/deleted/reused`，可直接使用小对象图测试。
+`FileFingerprint` 对每个受支持文件计算最终 SHA-256 身份；`DocumentIndexEntry` 把该身份、reader/chunker 版本与已发布 chunk IDs 绑定。当文件的 size 与 mtime 都与上一已发布 entry 一致时，会沿用该 entry 的 hash 而不重读文件内容（见 23.3）。`IncrementalIndexPlanner` 不访问文件系统、数据库或 embedding adapter，只比较上一 entries 与当前 fingerprints，输出 `added/modified/deleted/reused`，可直接使用小对象图测试。
 
 ### 16.2 完整 snapshot 的增量生成
 
-`IncrementalIndexBuilder` 按当前扫描顺序组装文件：reused 项从上一 snapshot 取回原 chunks 和 embeddings，added/modified 项才经过 reader、chunker 和批量 embedding，deleted 项自然从结果中消失。最终仍生成包含全部当前文件的完整 revision snapshot（当前格式 v5），不原地修改活动索引。
+`IncrementalIndexBuilder` 按当前扫描顺序组装文件：reused 项从上一 snapshot 取回原 chunks 和 embeddings，added/modified 项才经过 reader、chunker 和批量 embedding，deleted 项自然从结果中消失。added/modified 项的读取与分块在线程池中并行执行，但结果严格按原扫描下标回收，因此 chunk 顺序与身份和串行读取完全一致（见 23.3）。最终仍生成包含全部当前文件的完整 revision snapshot（当前格式 v5），不原地修改活动索引。
 
 复用的全局前提是 embedding model signature 兼容；每个文件还必须同时匹配内容 hash、大小、mtime、reader version 和 chunking version。任一条件变化都会重新处理必要文件。旧 v1-v3 snapshot 没有文件级 entries，会保守执行一次全量重建。
 
@@ -602,7 +609,7 @@ mvn.cmd -q -DskipTests package
 
 | readerId | 格式 | 实现 | 输入上限 |
 | --- | --- | --- | --- |
-| `plain-text` | Markdown、文本、配置、源码 | JDK UTF-8/系统编码回退 | 2 MiB |
+| `plain-text` | Markdown、文本、配置、源码 | BOM 嗅探 + 严格 UTF-8/系统编码回退 | 2 MiB |
 | `pdf-text-layer` | PDF 文本层 | PDFBox 2.0.32 | 32 MiB、最多 1000 页、最多 8 MiB 提取文本 |
 | `docx` | DOCX | Apache POI 5.3.0 | 32 MiB、最多 20000 个文本单元、8 MiB 提取文本 |
 | `pptx` | PPTX | Apache POI 5.3.0 | 32 MiB、最多 1000 张幻灯片、8 MiB 提取文本 |
@@ -666,6 +673,7 @@ mvn.cmd -q test
 
 ```text
 scan
+fingerprint
 readAndChunk
 embedding
 assemble
@@ -766,4 +774,104 @@ OpenAI-compatible prompt 同时加强：
 - history 只用于消解指代，事实仍必须由本轮 retrieval 支撑。
 
 每个 citation 使用显式 `SOURCE [n] BEGIN/END` 边界，并分别传递文件路径、统一来源位置和正文。`CourseFeaturesTest` 通过模拟 HTTP server 验证最终 JSON prompt 同时包含来源文件、只读资料边界和路径定位约束。
+
+## 23. 数据处理流程加固
+
+前面各阶段把索引的**事务性与发布语义**做扎实了（临时文件、原子移动、条件发布、freshness gate、增量复用）。本阶段处理的是这条链路两端此前未被覆盖的部分：入口的扫描策略过于宽松、出口的持久化反序列化没有防护，以及中间读取阶段完全串行。索引格式保持 v5，port 接口、发布语义与远程 RAG 门禁均未改动。
+
+### 23.1 索引反序列化白名单
+
+`IndexStore.loadPath` 此前把 `%USERPROFILE%\.simplerag\indexes\` 下的 `.bin` 直接交给无限制的 `ObjectInputStream.readObject()`。该目录是本机可写状态，被替换或投放的快照会在应用启动、切换知识库时触发 gadget chain（CWE-502）。
+
+现在每次加载都安装 `java.io.ObjectInputFilter`：
+
+```text
+maxbytes=<文件实际大小>;maxdepth=64;maxrefs=20000000;maxarray=20000000;
+com.simplerag.search.*;com.simplerag.model.*;java.util.*;java.lang.*;
+[F;[B;[J;[I;[Ljava.lang.Object;[Ljava.lang.String;!*
+```
+
+起决定作用的是尾部的 `!*`：真实 gadget chain 的载体（POI、PDFBox、commons-\*）全部落在白名单之外，一律拒绝。深度、引用数和数组长度上限限制手工构造流的资源消耗。
+
+过滤器在 try 块之外构造，因此白名单模式写错会立即抛 `IllegalArgumentException`，而不是被吞掉后静默让所有索引永远加载失败。命中过滤时抛出的 `InvalidClassException` 落进既有 catch，返回 `Optional.empty()`，上层按"索引缺失"要求重建——这是安全的降级方向，调用方无需改动。
+
+### 23.2 凭据文件与遍历预算
+
+`SensitiveFilePolicy` 是无 IO 的纯命名策略，在 reader 查找**之前**生效：
+
+| 规则 | 覆盖 |
+| --- | --- |
+| 文件名 | `.env`、`id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`、`.netrc`/`_netrc`、`.npmrc`、`.pypirc`、`credentials`、`.htpasswd`、`.git-credentials`、`secrets.yaml`/`.yml`/`.json` |
+| 扩展名 | `pem`、`key`、`p12`、`pfx`、`jks`、`keystore`、`kdbx`、`ppk`、`asc`、`gpg` |
+| 名称前缀 | `.env.`（覆盖 `.env.local`、`.env.production`） |
+| 目录名 | `.ssh`、`.gnupg`、`.aws`、`.azure`、`.kube` |
+
+这条规则的必要性来自项目自身的威胁模型：召回片段正文会随远程 RAG 发出，而 plain-text reader 收 `.properties`/`.conf`/`.json`/`.yaml`，本机密钥因此存在被切成 chunk 再送出机器的路径。命中规则的文件产出 `skipped=true` 的逐条警告——它们本可索引，跳过属于策略决定，应计入构建报告的跳过数并对用户可见。
+
+`ScanBudget` 限制单次扫描的文件数（默认 5 万）、总字节（默认 8 GiB）和目录深度（默认 32）。快照全量驻留内存，误选驱动器根目录此前会在构建可被取消之前耗尽堆。触顶时停止遍历并产出 `skipped=true` 警告；深度上限同时消除了 Windows 目录联接可能造成的无限递归。
+
+`DocumentScanner.scan` 还会折叠被包含的数据源根：`C:\x` 与 `C:\x\y` 同时配置时，后者被丢弃，避免同一文件在两个相对路径下各索引一次导致 chunk 与召回重复。
+
+原先被完全静默丢弃的两类文件现在聚合上报，均为 `skipped=false`（它们从不可索引，不应污染"本可索引却失败"的计数）：
+
+```text
+跳过 143 个不支持格式的文件（png 88、jpg 30、class 25）
+跳过 4 个符号链接或联接点（不跟随，避免遍历环路与越权读取）
+```
+
+### 23.3 并行读取与哈希快路径
+
+`IncrementalIndexBuilder` 的读取阶段改为线程池并行，池大小 `max(1, min(可用核心数 - 1, 8))`。正确性依赖两点：readers 每次调用新建 `PDDocument`/`OPCPackage` 且 `ChunkerRegistry` 全静态无状态，因此只有结果收集顺序需要固定——结果按原扫描下标回收，chunk 顺序、chunk 身份与警告顺序都与串行读取逐位一致，`incrementalSnapshotMatchesFullRebuild` 因此仍是有效门禁。取消语义通过显式的 cancelled 结果向上传递，不会把已取消的构建静默降级成部分索引。
+
+`FileFingerprint.capture(document, previous)` 增加快路径：size 与 mtime 都与上一已发布 entry 一致时沿用其 hash，跳过整文件读取；任一不一致仍算真 hash。这是 git/rsync 的同款判据。此前每次构建都要对每个文件做全量 SHA-256，包括那些马上就会被判定为"复用"的文件。
+
+该优化对增量等价性透明：被修改文件的 size/mtime 必变，新增文件无 previous entry，两者都走真 hash；未变文件沿用的旧 hash 本身就是真 hash。`simplerag.index.verifyContentHash=true` 强制全量校验，测试用它证明两条路径结果一致。
+
+`IndexReport.stageMillis` 新增 `fingerprint` 阶段（此前哈希开销被并入 `readAndChunk`），使这项优化在应用自身的诊断报告里可见。
+
+2026-07-27 实测（Windows 11，Java 17，16 logical processors，5 次取最优）：
+
+| 语料 | readAndChunk 串行 → 并行 | fingerprint 全量 → 快路径 |
+| --- | --- | --- |
+| 项目源码，137 files / 965 KB | 94 → 35 ms（2.69x） | 42 → 22 ms（1.91x） |
+| 复制语料，2740 files / 19 MB | 919 → 542 ms（1.70x） | 769 → 397 ms（1.94x） |
+| 大文件语料，50 files / 54 MB | 758 → 244 ms（3.11x） | 74 → 10 ms（7.40x） |
+
+中间一行的并行加速反而更低：几千个小文本文件里每文件的 open/stat 开销占主导，文件系统层自身在串行化，CPU 并行帮不上忙。第三行则确认哈希快路径的收益随**字节数**而非文件数放大，这正是它针对的场景（含大 PDF/Office 文档的知识库）。
+
+### 23.4 编码与格式覆盖
+
+`PlainTextDocumentReader` 先嗅探 BOM（`EF BB BF` → UTF-8，`FF FE` → UTF-16LE，`FE FF` → UTF-16BE）并剥离，无 BOM 时维持原有的"严格 UTF-8 → 平台默认"两级回退。此前 UTF-8 签名会把 `U+FEFF` 泄漏进首个词法单元污染 TF-IDF 特征，UTF-16 文档则解码成控制字符后被 `looksBinary` 丢弃。
+
+`PlainTextDocumentReader.VERSION` 因此从 1 提升到 2。按 19.2 的按 reader 收敛规则，这只触发 plain-text 负责格式的重建，PDF/DOCX 等仍可复用。
+
+扩展名补齐：`csv`、`tsv`、`proto`、`graphql`、`gql`、`tf`、`tfvars`、`hcl`、`lua`、`r`、`pl`、`pm`、`ex`、`exs`、`erl`、`dart`、`groovy`；文件名补齐 `gemfile`、`rakefile`、`procfile`、`vagrantfile`、`justfile`、`taskfile`。其中代码类同步加入 `ChunkerRegistry.CODE_EXTENSIONS` 以走重叠窗口分块。
+
+`ChunkerRegistry.CHUNKING_VERSION` **不提升**：新扩展名此前从未入过索引，没有存量条目的分块结果发生变化，提升它只会触发一次无意义的全库重建。
+
+### 23.5 新增系统属性
+
+| 属性 | 默认 | 作用 |
+| --- | --- | --- |
+| `simplerag.index.includeSensitiveFiles` | `false` | 置 `true` 关闭凭据文件排除（知识库本身就是凭据样例文档时使用） |
+| `simplerag.index.verifyContentHash` | `false` | 置 `true` 强制全量 SHA-256，绕过 size/mtime 快路径 |
+| `simplerag.index.readThreads` | 核心数 − 1，上限 8 | 覆盖读取并发；置 `1` 恢复完全串行 |
+| `simplerag.index.maxFiles` | `50000` | 单次扫描文件数上限 |
+| `simplerag.index.maxTotalBytes` | `8 GiB` | 单次扫描总字节上限 |
+| `simplerag.index.maxDepth` | `32` | 目录遍历深度上限 |
+
+### 23.6 验证
+
+```powershell
+mvn.cmd -q test
+.\build-and-test.cmd
+```
+
+JUnit/ArchUnit 共 79 项通过。新增 `IndexStoreSecurityTest`（3 项）；`DocumentScannerTest` 从 1 项扩到 7 项；`IncrementalIndexTest`、`DocumentReaderTest` 各新增 1 项。
+
+`IndexStoreSecurityTest` 的关键设计是 `com.simplerag.probe.UnexpectedGadget`——一个故意置于白名单之外的可序列化类，在 `readObject` 中置位静态标志。断言 `deserialized == false` 才能证明过滤器拦在**类解析阶段**；仅断言 `Optional.empty()` 无法区分"过滤器生效"和"最终类型不匹配"，两者都会返回空。
+
+回归门禁全部保持：`IndexConsistencyTest` 11/11、`RuntimeFreshnessTest` 5/5、`ArchitectureTest` 10/10。真实 ONNX 质量门禁 Recall@5 1.000、MRR@10 1.000、nDCG@10 0.991，说明 reader 版本提升与扩展名补齐未影响检索质量。
+
+新增类全部位于 `..search..` 包内并复用既有的 `IndexBuildWarning` 上报通道，未新增依赖、未改动 port 接口，因此现有 ArchUnit 规则无需放宽。
 
