@@ -1,30 +1,39 @@
-# Maven / Java build output
-/target/
-**/target/
-/build/
-**/build/
+# Build and packaging output
+target/
+build/
 /out/
+/dist/
+/release/
 *.class
 *.jar
 *.war
 *.ear
+*.jmod
 !/.mvn/wrapper/maven-wrapper.jar
 
-# Project-local Maven dependency cache (keep .mvn/maven.config and wrapper files)
+# Maven local/generated files
 /.mvn/repository/
+/.flattened-pom.xml
+/dependency-reduced-pom.xml
 
-# Downloaded local embedding models and temporary model cache
+# Downloaded models and application runtime data
 /models/
 /.cache/
-
-# SimpleRAG runtime data when configured inside the repository
 /.simplerag/
 *.db
 *.db-journal
 *.db-shm
 *.db-wal
 
-# Python runtime caches and local environments
+# Test, profiling, and crash output
+/coverage/
+*.exec
+*.hprof
+hs_err_pid*
+replay_pid*
+.attach_pid*
+
+# Python caches and local environments used by auxiliary tools
 __pycache__/
 *.py[cod]
 *.pyd
@@ -32,14 +41,18 @@ __pycache__/
 /venv/
 /env/
 
-# Local credentials and machine-specific configuration
+# Local configuration, credentials, and signing material
 .env
 .env.*
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+*.keystore
 
-# Logs, crash dumps, and temporary downloads
+# Logs and temporary/editor files
 *.log
 *.tmp
 *.temp
@@ -47,11 +60,12 @@ __pycache__/
 *.bak
 *.swp
 *.swo
-hs_err_pid*
-replay_pid*
+*~
+~$*
 
-# IntelliJ IDEA
+# IntelliJ IDEA and JetBrains Fleet
 /.idea/
+/.fleet/
 *.iws
 *.iml
 *.ipr
@@ -65,21 +79,25 @@ replay_pid*
 /.springBeans
 /.sts4-cache/
 
-# NetBeans / Gradle IDE metadata
+# NetBeans and Gradle metadata
 /nbproject/private/
 /nbbuild/
-/dist/
 /nbdist/
 /.nb-gradle/
 /.gradle/
 
-# VS Code and local agent metadata
+# VS Code and local AI-agent metadata
 /.vscode/
 /.agents/
 /.codex/
 
-# Operating system files
+# Operating-system files
 .DS_Store
+._*
+.Spotlight-V100/
+.Trashes/
 Thumbs.db
+ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+*.stackdump
