@@ -19,7 +19,6 @@ import com.simplerag.model.IndexStatus;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.RagAnswer;
 import com.simplerag.model.RagCitation;
-import com.simplerag.model.SearchResult;
 import com.simplerag.search.IndexHandle;
 import com.simplerag.rag.ApiConfig;
 
@@ -70,21 +69,18 @@ public final class AskUseCase implements AskKnowledge {
                     Map.of("knowledgeBaseId", knowledgeBaseId, "revision", Long.toString(expectedRevision)));
             throw new IllegalStateException("当前知识库启用了“仅本地 RAG”，已禁止远程发送");
         }
-        // Every turn re-runs retrieval; history must never reintroduce prior citation snippets.
-        List<RagCitation> citations = retrieve(handle, question);
-        List<CitationView> views = citations.stream().map(AskUseCase::toView).toList();
-        if (onCitations != null) onCitations.accept(views);
-        freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
-        String host = config.targetHost();
-        RemoteSendReview review = new RemoteSendReview(knowledgeBaseId, knowledgeBase.name(), expectedRevision,
-                host, trusted(host), views);
-        if (authorizer == null || !authorizer.authorize(review)) {
-            diagnostics.record("RAG blocked reason", "security", "remote send was not authorized",
-                    Map.of("knowledgeBaseId", knowledgeBaseId, "targetHost", host,
-                            "chunkCount", Integer.toString(views.size())));
-            throw new IllegalStateException("用户取消了远程发送");
-        }
+        // History only resolves conversational references. Every turn builds a fresh, bounded evidence set.
         List<ChatMessage> safeHistory = history == null ? List.of() : List.copyOf(history);
+        IterativeRetrieval retrieval = new IterativeRetrieval(chat);
+        List<RagCitation> citations = retrieval.collect(handle.knowledgeBaseId(), handle.sourceRevision(),
+                question, safeHistory, config,
+                query -> handle.engine().search(query, 8, "\u5168\u90e8"),
+                scope -> publishAndAuthorizeScope(knowledgeBase, expectedRevision, config, scope,
+                        onCitations, authorizer),
+                () -> freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision()));
+
+        freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
+        List<CitationView> views = citations.stream().map(AskUseCase::toView).toList();
         ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
                 question, safeHistory, citations);
         RagAnswer answer = chat.answerStream(config, request, onDelta);
@@ -116,11 +112,22 @@ public final class AskUseCase implements AskKnowledge {
         return handle;
     }
 
-    private static List<RagCitation> retrieve(IndexHandle handle, String question) {
-        List<SearchResult> results = handle.engine().search(question, 8, "全部");
-        return java.util.stream.IntStream.range(0, Math.min(6, results.size()))
-                .mapToObj(index -> new RagCitation(index + 1, results.get(index).chunk(), results.get(index).score()))
-                .toList();
+    private void publishAndAuthorizeScope(KnowledgeBase knowledgeBase, long expectedRevision, ApiConfig config,
+                                          List<RagCitation> citations,
+                                          Consumer<List<CitationView>> onCitations,
+                                          RemoteSendAuthorizer authorizer) {
+        List<CitationView> views = citations.stream().map(AskUseCase::toView).toList();
+        if (onCitations != null) onCitations.accept(views);
+        freshnessGate.requireFresh(knowledgeBase.id(), expectedRevision);
+        String host = config.targetHost();
+        RemoteSendReview review = new RemoteSendReview(knowledgeBase.id(), knowledgeBase.name(), expectedRevision,
+                host, trusted(host), views);
+        if (authorizer == null || !authorizer.authorize(review)) {
+            diagnostics.record("RAG blocked reason", "security", "remote send was not authorized",
+                    Map.of("knowledgeBaseId", knowledgeBase.id(), "targetHost", host,
+                            "chunkCount", Integer.toString(views.size())));
+            throw new IllegalStateException("用户取消了远程发送");
+        }
     }
 
     private static CitationView toView(RagCitation citation) {

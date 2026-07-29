@@ -186,8 +186,8 @@ public final class AskPanel extends JPanel {
         clearCitations();
         addBubble(true, userText, false);
         streamingAssistant = addBubble(false, "", true);
-        conversationTitle("正在检索并生成回答…");
-        conversationMeta("本轮将重新执行 freshness 检查与知识检索");
+        conversationTitle("AI 正在检索相关文件…");
+        conversationMeta("模型会评估证据并按需追加检索（最多 4 轮）");
         revalidateTranscript(true);
     }
 
@@ -195,6 +195,10 @@ public final class AskPanel extends JPanel {
         if (streamingAssistant == null) {
             removeEmptyState();
             streamingAssistant = addBubble(false, "", true);
+        }
+        if (streamingAssistant.isEmpty()) {
+            conversationTitle("正在生成回答…");
+            conversationMeta("AI 已完成多轮检索 · 本轮引用 " + citations.size() + " 个片段");
         }
         streamingAssistant.append(delta);
         revalidateTranscript(true);
@@ -211,7 +215,7 @@ public final class AskPanel extends JPanel {
             addBubble(false, fullText, false);
         }
         conversationTitle(model == null || model.isBlank() ? "对话" : "对话 · " + model);
-        conversationMeta("多轮上下文已启用 · 历史不含引用片段");
+        conversationMeta("多轮上下文与 AI 自主检索已启用 · 历史不含引用片段");
         revalidateTranscript(true);
     }
 

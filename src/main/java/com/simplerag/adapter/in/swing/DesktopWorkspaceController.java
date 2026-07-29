@@ -306,10 +306,10 @@ public final class DesktopWorkspaceController {
     private void publishCitations(List<CitationView> citations) {
         javax.swing.SwingUtilities.invokeLater(() -> {
             askPanel.citations(citations);
-            askPanel.conversationTitle(citations.isEmpty() ? "未找到相关引用，正在生成…" : "正在生成回答…");
+            askPanel.conversationTitle("AI 正在检索相关文件…");
             askPanel.conversationMeta(citations.isEmpty()
-                    ? "本轮检索无命中片段，模型将据实说明"
-                    : "本轮引用 " + citations.size() + " 个片段 · 不写入历史");
+                    ? "当前检索未命中，AI 将尝试调整检索词"
+                    : "已汇总 " + citations.size() + " 个片段 · AI 将判断是否继续检索");
         });
     }
 
