@@ -10,6 +10,7 @@ import com.simplerag.application.dto.RemoteSendReview;
 import com.simplerag.application.diagnostics.DiagnosticReportService;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.KnowledgeStats;
+import com.simplerag.model.TokenUsage;
 import com.simplerag.rag.ApiConfig;
 
 import javax.swing.Box;
@@ -263,7 +264,8 @@ public final class DesktopWorkspaceController {
                 }, answer -> {
                     askPanel.asking(false);
                     askPanel.finishAssistant(answer.text(), answer.model());
-                    flashStatus("问答完成，引用 " + answer.citations().size() + " 个片段");
+                    askPanel.conversationMeta("多轮上下文与 AI 自主检索已启用 · 本轮 " + tokenSummary(answer.usage()));
+                    flashStatus("问答完成，引用 " + answer.citations().size() + " 个片段 · " + tokenSummary(answer.usage()));
                 }, failure -> {
                     askPanel.asking(false);
                     askPanel.failAssistant(failure.getMessage());
@@ -276,6 +278,13 @@ public final class DesktopWorkspaceController {
                 });
     }
 
+    /** Real consumption reported by the provider, summed over every call this turn made. */
+    private static String tokenSummary(TokenUsage usage) {
+        if (usage == null || !usage.known()) return "本轮 token 消耗未由 API 返回";
+        return "消耗 " + usage.totalTokens() + " tokens（输入 " + usage.promptTokens()
+                + " · 输出 " + usage.completionTokens() + "）";
+    }
+
     private boolean authorizeRemoteSend(RemoteSendReview review) {
         AtomicInteger choice = new AtomicInteger(2);
         Runnable prompt = () -> {
@@ -283,14 +292,17 @@ public final class DesktopWorkspaceController {
             review.citations().stream().limit(8).forEach(citation -> scope.append("\n• ")
                     .append(citation.document().fileName()).append(" · ")
                     .append(citation.document().sourceLocation()));
+            if (review.citations().isEmpty()) scope.append("\n（首轮检索未命中，AI 将尝试调整检索词）");
             Object[] options = {"仅本次发送", "信任此 Host 并发送", "取消"};
             choice.set(JOptionPane.showOptionDialog(askPanel,
-                    "即将发送远程 RAG 请求\n\n知识库：" + review.knowledgeBaseName()
+                    "即将发送远程 RAG 请求（本轮自动检索）\n\n知识库：" + review.knowledgeBaseName()
                             + "\nRevision：" + review.sourceRevision()
                             + "\n目标 Host：" + review.targetHost()
                             + (review.trustedHost() ? "（已信任）" : "（未信任）")
-                            + "\n片段数量：" + review.chunkCount()
-                            + "\n发送范围（文件与位置）：" + scope,
+                            + "\n本轮最多检索：" + review.maxSearches() + " 次 · 最多发送："
+                            + review.maxCitations() + " 个片段"
+                            + "\n\n首批发送范围（文件与位置，共 " + review.chunkCount() + " 个）：" + scope
+                            + "\n\n后续追加检索的新增片段会在引用面板实时显示，不再重复弹窗。",
                     "确认远程发送", JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE,
                     null, options, options[review.trustedHost() ? 0 : 2]));
         };

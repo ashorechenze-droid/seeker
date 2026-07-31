@@ -8,6 +8,7 @@ import com.simplerag.application.port.out.ChatModel;
 import com.simplerag.model.DocumentChunk;
 import com.simplerag.model.RagCitation;
 import com.simplerag.model.SearchResult;
+import com.simplerag.model.TokenUsage;
 import com.simplerag.rag.ApiConfig;
 
 import java.io.IOException;
@@ -32,14 +33,18 @@ final class IterativeRetrieval {
         this.chat = chat;
     }
 
-    List<RagCitation> collect(String knowledgeBaseId, long sourceRevision, String question,
-                              List<ChatMessage> history, ApiConfig config,
-                              Function<String, List<SearchResult>> search,
-                              Consumer<List<RagCitation>> onCitationScopeChanged,
-                              Runnable beforeRemoteCall)
+    /** Citations gathered for the turn, plus what the planning rounds actually cost. */
+    record Result(List<RagCitation> citations, TokenUsage usage) { }
+
+    Result collect(String knowledgeBaseId, long sourceRevision, String question,
+                   List<ChatMessage> history, ApiConfig config,
+                   Function<String, List<SearchResult>> search,
+                   Consumer<List<RagCitation>> onCitationScopeChanged,
+                   Runnable beforeRemoteCall)
             throws IOException, InterruptedException {
         Map<String, Candidate> collected = new LinkedHashMap<>();
         List<RetrievalAttempt> attempts = new ArrayList<>();
+        TokenUsage usage = TokenUsage.UNKNOWN;
         int initialAdded = addResults(collected, search.apply(question), INITIAL_CITATIONS);
         attempts.add(new RetrievalAttempt(question, initialAdded));
         List<RagCitation> citations = numbered(collected);
@@ -47,11 +52,22 @@ final class IterativeRetrieval {
 
         for (int searchNumber = 1; searchNumber < MAX_SEARCHES; searchNumber++) {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException("Question answering was cancelled");
+            if (collected.size() >= MAX_CITATIONS) break;
             beforeRemoteCall.run();
             RetrievalPlanRequest request = new RetrievalPlanRequest(knowledgeBaseId, sourceRevision,
                     question, history, citations, attempts, MAX_SEARCHES - searchNumber);
-            RetrievalDecision decision = chat.planRetrieval(config, request);
-            if (decision == null || !decision.shouldSearch()) break;
+            RetrievalDecision decision;
+            try {
+                decision = chat.planRetrieval(config, request);
+            } catch (IOException plannerUnreachable) {
+                // Planning is an optimisation. Losing it costs recall; letting it abort the turn would
+                // cost the answer entirely, so fall back to the evidence already collected.
+                break;
+            }
+            if (decision == null) break;
+            // A planning round is billed even when it decides to stop searching.
+            usage = usage.plus(decision.usage());
+            if (!decision.shouldSearch()) break;
 
             String query = decision.query();
             if (alreadyTried(attempts, query)) break;
@@ -63,7 +79,7 @@ final class IterativeRetrieval {
             }
             if (collected.size() >= MAX_CITATIONS) break;
         }
-        return citations;
+        return new Result(citations, usage);
     }
 
     private static int addResults(Map<String, Candidate> collected, List<SearchResult> results, int limit) {

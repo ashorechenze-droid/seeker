@@ -6,7 +6,8 @@ import java.util.Objects;
 
 /**
  * Limits multi-turn history so context cannot grow without bound.
- * Uses a coarse char/4 token estimate — good enough for local budgeting.
+ * Budgeting runs through {@link TokenEstimator}, which is calibrated against the provider's real
+ * reported usage rather than the old char/4 rule.
  */
 public final class ConversationContext {
     public static final int DEFAULT_MAX_TURNS = 12;
@@ -14,8 +15,13 @@ public final class ConversationContext {
 
     private final int maxTurns;
     private final int maxHistoryTokens;
+    private final TokenEstimator estimator;
 
     public ConversationContext(int maxTurns, int maxHistoryTokens) {
+        this(maxTurns, maxHistoryTokens, new TokenEstimator());
+    }
+
+    public ConversationContext(int maxTurns, int maxHistoryTokens, TokenEstimator estimator) {
         if (maxTurns < 1) {
             throw new IllegalArgumentException("maxTurns 必须 >= 1");
         }
@@ -24,10 +30,15 @@ public final class ConversationContext {
         }
         this.maxTurns = maxTurns;
         this.maxHistoryTokens = maxHistoryTokens;
+        this.estimator = Objects.requireNonNull(estimator, "estimator");
     }
 
     public static ConversationContext defaults() {
         return new ConversationContext(DEFAULT_MAX_TURNS, DEFAULT_MAX_HISTORY_TOKENS);
+    }
+
+    public static ConversationContext defaults(TokenEstimator estimator) {
+        return new ConversationContext(DEFAULT_MAX_TURNS, DEFAULT_MAX_HISTORY_TOKENS, estimator);
     }
 
     public int maxTurns() {
@@ -53,16 +64,16 @@ public final class ConversationContext {
         while (!window.isEmpty() && window.get(0).role() != ChatMessage.Role.USER) {
             window.remove(0);
         }
-        while (estimatedTokens(window) > maxHistoryTokens && window.size() > 1) {
+        while (estimator.estimate(window) > maxHistoryTokens && window.size() > 1) {
             window.remove(0);
             while (!window.isEmpty() && window.get(0).role() != ChatMessage.Role.USER) {
                 window.remove(0);
             }
         }
-        if (estimatedTokens(window) > maxHistoryTokens && window.size() == 1) {
+        if (estimator.estimate(window) > maxHistoryTokens && window.size() == 1) {
             // Single oversized message: keep a truncated tail so the model still gets a signal.
             ChatMessage only = window.get(0);
-            int keepChars = Math.max(64, maxHistoryTokens * 4);
+            int keepChars = Math.max(64, charsFor(maxHistoryTokens, only.content()));
             if (only.content().length() > keepChars) {
                 String truncated = "…" + only.content().substring(only.content().length() - keepChars);
                 return List.of(new ChatMessage(only.id(), only.role(), truncated, only.createdAt()));
@@ -71,11 +82,22 @@ public final class ConversationContext {
         return List.copyOf(window);
     }
 
-    public static int estimatedTokens(List<ChatMessage> messages) {
-        int total = 0;
-        for (ChatMessage message : messages) {
-            total += message.estimatedTokens();
-        }
-        return total;
+    /**
+     * How many characters of this text fit in a token budget. Derived from the text's own measured
+     * token density so a Chinese message is not cut as if it were English.
+     */
+    private int charsFor(int tokenBudget, String text) {
+        int tokens = Math.max(1, estimator.estimate(text));
+        double charsPerToken = Math.max(0.5, (double) text.length() / tokens);
+        return (int) Math.floor(tokenBudget * charsPerToken);
+    }
+
+    public int estimatedTokens(List<ChatMessage> messages) {
+        return estimator.estimate(messages);
+    }
+
+    /** Uncalibrated script-aware count, for callers without an estimator instance. */
+    public static int rawTokens(List<ChatMessage> messages) {
+        return TokenEstimator.rawMessageTokens(messages);
     }
 }

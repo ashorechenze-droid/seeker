@@ -332,8 +332,9 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         if (onCitations != null) onCitations.accept(citationViews);
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
         KnowledgeBase knowledgeBase = knowledgeBases.findKnowledgeBase(knowledgeBaseId).orElseThrow();
+        // Single-shot path: one search, one send. The ceiling equals what is on screen right now.
         RemoteSendReview review = new RemoteSendReview(knowledgeBaseId, knowledgeBase.name(), expectedRevision,
-                config.targetHost(), false, citationViews);
+                config.targetHost(), false, citationViews, 1, citationViews.size());
         if (authorizer == null || !authorizer.authorize(review)) throw new IllegalStateException("用户取消了远程发送");
         List<ChatMessage> safeHistory = history == null ? List.of() : List.copyOf(history);
         ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),

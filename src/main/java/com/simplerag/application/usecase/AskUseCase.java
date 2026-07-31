@@ -19,11 +19,13 @@ import com.simplerag.model.IndexStatus;
 import com.simplerag.model.KnowledgeBase;
 import com.simplerag.model.RagAnswer;
 import com.simplerag.model.RagCitation;
+import com.simplerag.model.TokenUsage;
 import com.simplerag.search.IndexHandle;
 import com.simplerag.rag.ApiConfig;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.Map;
 
@@ -72,19 +74,32 @@ public final class AskUseCase implements AskKnowledge {
         // History only resolves conversational references. Every turn builds a fresh, bounded evidence set.
         List<ChatMessage> safeHistory = history == null ? List.of() : List.copyOf(history);
         IterativeRetrieval retrieval = new IterativeRetrieval(chat);
-        List<RagCitation> citations = retrieval.collect(handle.knowledgeBaseId(), handle.sourceRevision(),
+        // One authorization per turn: the user approves the target host and the ceiling the adaptive
+        // loop may reach, then follow-up evidence only refreshes the citation panel. Re-prompting on
+        // every scope change blocked the worker thread between remote calls, which let the pooled TLS
+        // connection go stale mid-turn.
+        AtomicBoolean authorized = new AtomicBoolean();
+        IterativeRetrieval.Result retrieved = retrieval.collect(handle.knowledgeBaseId(), handle.sourceRevision(),
                 question, safeHistory, config,
                 query -> handle.engine().search(query, 8, "\u5168\u90e8"),
-                scope -> publishAndAuthorizeScope(knowledgeBase, expectedRevision, config, scope,
-                        onCitations, authorizer),
+                scope -> publishScope(knowledgeBase, expectedRevision, config, scope,
+                        onCitations, authorizer, authorized),
                 () -> freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision()));
+        List<RagCitation> citations = retrieved.citations();
 
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
         List<CitationView> views = citations.stream().map(AskUseCase::toView).toList();
         ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
                 question, safeHistory, citations);
         RagAnswer answer = chat.answerStream(config, request, onDelta);
-        return new AskResultView(answer.text(), views, answer.model());
+        // One turn bills several calls: every planning round plus the answer itself.
+        TokenUsage turnUsage = retrieved.usage().plus(answer.usage());
+        diagnostics.record("turn token usage", "remote-api", "ask",
+                Map.of("knowledgeBaseId", knowledgeBaseId,
+                        "promptTokens", Integer.toString(turnUsage.promptTokens()),
+                        "completionTokens", Integer.toString(turnUsage.completionTokens()),
+                        "totalTokens", Integer.toString(turnUsage.totalTokens())));
+        return new AskResultView(answer.text(), views, answer.model(), turnUsage);
     }
 
     private boolean localOnly(String knowledgeBaseId) {
@@ -112,16 +127,17 @@ public final class AskUseCase implements AskKnowledge {
         return handle;
     }
 
-    private void publishAndAuthorizeScope(KnowledgeBase knowledgeBase, long expectedRevision, ApiConfig config,
-                                          List<RagCitation> citations,
-                                          Consumer<List<CitationView>> onCitations,
-                                          RemoteSendAuthorizer authorizer) {
+    private void publishScope(KnowledgeBase knowledgeBase, long expectedRevision, ApiConfig config,
+                              List<RagCitation> citations,
+                              Consumer<List<CitationView>> onCitations,
+                              RemoteSendAuthorizer authorizer, AtomicBoolean authorized) {
         List<CitationView> views = citations.stream().map(AskUseCase::toView).toList();
         if (onCitations != null) onCitations.accept(views);
         freshnessGate.requireFresh(knowledgeBase.id(), expectedRevision);
+        if (!authorized.compareAndSet(false, true)) return;
         String host = config.targetHost();
         RemoteSendReview review = new RemoteSendReview(knowledgeBase.id(), knowledgeBase.name(), expectedRevision,
-                host, trusted(host), views);
+                host, trusted(host), views, IterativeRetrieval.MAX_SEARCHES, IterativeRetrieval.MAX_CITATIONS);
         if (authorizer == null || !authorizer.authorize(review)) {
             diagnostics.record("RAG blocked reason", "security", "remote send was not authorized",
                     Map.of("knowledgeBaseId", knowledgeBase.id(), "targetHost", host,

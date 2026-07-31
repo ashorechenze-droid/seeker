@@ -11,6 +11,7 @@ import com.simplerag.model.SearchResult;
 import com.simplerag.rag.ApiConfig;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -32,7 +33,7 @@ class IterativeRetrievalTest {
         List<Integer> publishedSizes = new ArrayList<>();
         AtomicInteger freshnessChecks = new AtomicInteger();
 
-        List<RagCitation> result = retrieval.collect("kb", 7L, "how does it work?", List.of(), CONFIG,
+        IterativeRetrieval.Result result = retrieval.collect("kb", 7L, "how does it work?", List.of(), CONFIG,
                 query -> {
                     queries.add(query);
                     if (query.startsWith("beta")) return List.of(hit("c2", 0.9), hit("c3", 0.8));
@@ -44,8 +45,8 @@ class IterativeRetrievalTest {
         assertEquals(List.of(2, 3, 4), publishedSizes);
         assertEquals(3, freshnessChecks.get());
         assertEquals(List.of("c1", "c2", "c3", "c4"),
-                result.stream().map(citation -> citation.chunk().id()).toList());
-        assertEquals(List.of(1, 2, 3, 4), result.stream().map(RagCitation::number).toList());
+                result.citations().stream().map(citation -> citation.chunk().id()).toList());
+        assertEquals(List.of(1, 2, 3, 4), result.citations().stream().map(RagCitation::number).toList());
         assertEquals(List.of(2, 3, 4), chat.evidenceSizes);
     }
 
@@ -58,7 +59,7 @@ class IterativeRetrievalTest {
         IterativeRetrieval retrieval = new IterativeRetrieval(chat);
         AtomicInteger searchNumber = new AtomicInteger();
 
-        List<RagCitation> result = retrieval.collect("kb", 1L, "initial", List.of(), CONFIG,
+        IterativeRetrieval.Result result = retrieval.collect("kb", 1L, "initial", List.of(), CONFIG,
                 query -> {
                     int batch = searchNumber.getAndIncrement();
                     List<SearchResult> hits = new ArrayList<>();
@@ -66,14 +67,52 @@ class IterativeRetrievalTest {
                     return hits;
                 }, ignored -> { }, () -> { });
 
-        assertEquals(12, result.size());
+        assertEquals(12, result.citations().size());
         assertEquals(3, searchNumber.get());
+    }
+
+    @Test
+    void anUnreachablePlannerFallsBackToTheEvidenceAlreadyCollected() throws Exception {
+        // The exact failure reported from the field: the peer cut the TLS stream mid-record.
+        ChatModel chat = new UnreachablePlanner(
+                new IOException("BUFFER_UNDERFLOW with EOF, 11248 bytes non decrypted."));
+        IterativeRetrieval retrieval = new IterativeRetrieval(chat);
+        AtomicInteger searches = new AtomicInteger();
+
+        IterativeRetrieval.Result result = retrieval.collect("kb", 3L, "where are credentials stored?", List.of(), CONFIG,
+                query -> {
+                    searches.incrementAndGet();
+                    return List.of(hit("c1", 0.9), hit("c2", 0.8));
+                }, ignored -> { }, () -> { });
+
+        assertEquals(List.of("c1", "c2"), result.citations().stream().map(citation -> citation.chunk().id()).toList());
+        assertEquals(1, searches.get());
     }
 
     private static SearchResult hit(String id, double score) {
         DocumentChunk chunk = new DocumentChunk(id, "docs/" + id + ".md", "docs", id + ".md", ".md",
                 1, 3, "content for " + id, 1L, null);
         return new SearchResult(chunk, score, "test");
+    }
+
+    private static final class UnreachablePlanner implements ChatModel {
+        private final IOException failure;
+
+        private UnreachablePlanner(IOException failure) {
+            this.failure = failure;
+        }
+
+        @Override public List<String> listModels(ApiConfig config) { return List.of("model"); }
+        @Override public RagAnswer answer(ApiConfig config, ChatRequest request) {
+            return new RagAnswer("answer", request.citations(), config.model());
+        }
+        @Override public RagAnswer answerStream(ApiConfig config, ChatRequest request, Consumer<String> onDelta) {
+            return answer(config, request);
+        }
+        @Override public RetrievalDecision planRetrieval(ApiConfig config, RetrievalPlanRequest request)
+                throws IOException {
+            throw failure;
+        }
     }
 
     private static final class PlanningChat implements ChatModel {

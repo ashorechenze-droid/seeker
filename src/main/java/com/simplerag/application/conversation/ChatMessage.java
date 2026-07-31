@@ -35,8 +35,11 @@ public record ChatMessage(String id, Role role, String content, Instant createdA
         return new ChatMessage(UUID.randomUUID().toString(), Role.SYSTEM, content, Instant.now());
     }
 
-    /** Approximate character budget used for history trimming (not tokenizer-precise). */
+    /**
+     * Script-aware token estimate. Budgeting normally goes through {@link TokenEstimator} so it can
+     * apply the model's calibrated correction; this uncalibrated form is the raw baseline.
+     */
     public int estimatedTokens() {
-        return Math.max(1, (content.length() + 3) / 4);
+        return Math.max(1, TokenEstimator.rawTokens(content));
     }
 }

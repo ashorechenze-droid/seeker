@@ -50,7 +50,7 @@ class ConversationModulesTest {
         }
         List<ChatMessage> trimmed = policy.trim(messages);
         assertTrue(trimmed.size() <= 4);
-        assertTrue(ConversationContext.estimatedTokens(trimmed) <= 200);
+        assertTrue(policy.estimatedTokens(trimmed) <= 200);
         assertEquals(ChatMessage.Role.USER, trimmed.get(0).role());
     }
 

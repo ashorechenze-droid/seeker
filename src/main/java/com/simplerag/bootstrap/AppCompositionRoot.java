@@ -28,6 +28,9 @@ import com.simplerag.adapter.in.swing.MainFrame;
 import com.simplerag.adapter.in.swing.ThemeBootstrap;
 import com.simplerag.adapter.in.swing.BackgroundTaskCoordinator;
 import com.simplerag.adapter.in.swing.SystemDesktopFileGateway;
+import com.simplerag.application.conversation.ConversationContext;
+import com.simplerag.application.conversation.ConversationStore;
+import com.simplerag.application.conversation.TokenEstimator;
 
 import javax.swing.SwingUtilities;
 import java.nio.file.Path;
@@ -41,7 +44,10 @@ public final class AppCompositionRoot {
         InMemoryDiagnosticLog diagnostics = new InMemoryDiagnosticLog();
         WindowsCredentialManagerSecretStore secrets = new WindowsCredentialManagerSecretStore(
                 new SecretCodec(), diagnostics);
-        OpenAiCompatibleClient chat = new OpenAiCompatibleClient(diagnostics);
+        // One estimator shared by the adapter (which observes real usage) and history trimming
+        // (which spends the budget), so the budget tracks what the endpoint actually charges.
+        TokenEstimator tokens = new TokenEstimator(sqlite);
+        OpenAiCompatibleClient chat = new OpenAiCompatibleClient(diagnostics, tokens);
         FileSystemSourceFreshnessMonitor freshness = new FileSystemSourceFreshnessMonitor();
         ActiveKnowledgeRuntime runtime = new ActiveKnowledgeRuntime(new IndexLifecycle(), diagnostics);
         KnowledgeService service = new KnowledgeService(
@@ -60,7 +66,8 @@ public final class AppCompositionRoot {
         SwingUtilities.invokeLater(() -> {
             MainFrame frame = new MainFrame(
                     new KnowledgeController(knowledgeBases, sources, indexBuild, desktopQueries),
-                    new SearchController(search), new AskController(ask, apiSettings),
+                    new SearchController(search), new AskController(ask, apiSettings,
+                            new ConversationStore(ConversationContext.defaults(tokens))),
                     new BackgroundTaskCoordinator(), new SystemDesktopFileGateway(),
                     new DiagnosticReportService(runtime, diagnostics));
             frame.setVisible(true);
