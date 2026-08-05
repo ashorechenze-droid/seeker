@@ -1,6 +1,7 @@
 package com.simplerag.bootstrap;
 
 import com.simplerag.adapter.out.onnx.Langchain4jOnnxEmbeddingProvider;
+import com.simplerag.evaluation.RetrievalAblationReport;
 import com.simplerag.evaluation.RetrievalEvaluationDataset;
 import com.simplerag.evaluation.RetrievalEvaluationReport;
 import com.simplerag.evaluation.RetrievalEvaluator;
@@ -24,8 +25,12 @@ public final class RetrievalEvaluationMain {
         RetrievalEvaluationDataset dataset = RetrievalEvaluationDataset.load(datasetPath);
         RetrievalEvaluationReport report = evaluator.evaluate(dataset, engine, indexingMillis);
         evaluator.save(report, reportPath);
+        RetrievalAblationReport ablations = evaluator.evaluateAblations(dataset, engine, indexingMillis);
+        Path ablationPath = reportPath.resolveSibling("retrieval-ablation.json");
+        evaluator.save(ablations, ablationPath);
         evaluator.verifyThresholds(dataset, report);
-        System.out.printf("Recall@5=%.3f MRR@10=%.3f nDCG@10=%.3f report=%s%n",
-                report.recallAt5(), report.mrrAt10(), report.ndcgAt10(), reportPath.toAbsolutePath());
+        System.out.printf("Recall@5=%.3f Recall@20=%.3f HitRate@5=%.3f MRR@10=%.3f nDCG@10=%.3f report=%s ablation=%s%n",
+                report.recallAt5(), report.recallAt20(), report.hitRateAt5(), report.mrrAt10(),
+                report.ndcgAt10(), reportPath.toAbsolutePath(), ablationPath.toAbsolutePath());
     }
 }

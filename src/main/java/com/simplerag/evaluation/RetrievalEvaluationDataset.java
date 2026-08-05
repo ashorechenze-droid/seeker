@@ -7,8 +7,9 @@ import java.nio.file.Path;
 import java.util.List;
 
 public record RetrievalEvaluationDataset(String name, int version, double minimumRecallAt5,
-                                         double minimumMrrAt10, double minimumNdcgAt10,
-                                         List<RetrievalEvaluationCase> cases) {
+                                          double minimumMrrAt10, double minimumNdcgAt10,
+                                          double minimumHitRateAt5, double minimumRecallAt20,
+                                          List<RetrievalEvaluationCase> cases) {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     public RetrievalEvaluationDataset {
@@ -17,8 +18,17 @@ public record RetrievalEvaluationDataset(String name, int version, double minimu
         validateThreshold(minimumRecallAt5, "minimumRecallAt5");
         validateThreshold(minimumMrrAt10, "minimumMrrAt10");
         validateThreshold(minimumNdcgAt10, "minimumNdcgAt10");
+        validateThreshold(minimumHitRateAt5, "minimumHitRateAt5");
+        validateThreshold(minimumRecallAt20, "minimumRecallAt20");
         cases = List.copyOf(cases == null ? List.of() : cases);
         if (cases.isEmpty()) throw new IllegalArgumentException("cases 不能为空");
+    }
+
+    public RetrievalEvaluationDataset(String name, int version, double minimumRecallAt5,
+                                      double minimumMrrAt10, double minimumNdcgAt10,
+                                      List<RetrievalEvaluationCase> cases) {
+        this(name, version, minimumRecallAt5, minimumMrrAt10, minimumNdcgAt10,
+                minimumRecallAt5, minimumRecallAt5, cases);
     }
 
     private static void validateThreshold(double value, String field) {

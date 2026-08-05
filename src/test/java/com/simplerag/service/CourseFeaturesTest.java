@@ -48,7 +48,7 @@ public final class CourseFeaturesTest {
         service.addSource(Path.of("examples", "knowledge"));
         service.rebuildCurrent(null);
         check(service.roots().size() == 1, "代码知识库应保存独立数据源");
-        check(service.stats().files() == 5, "代码知识库应索引示例文件");
+        check(service.stats().files() >= 17, "代码知识库应索引示例文件");
 
         service.selectKnowledgeBase(first.id());
         check(service.roots().isEmpty(), "知识库之间的数据源必须隔离");

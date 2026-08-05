@@ -1,17 +1,761 @@
 {
-  "name": "SimpleRAG example knowledge baseline",
-  "version": 2,
-  "minimumRecallAt5": 0.95,
-  "minimumMrrAt10": 0.95,
-  "minimumNdcgAt10": 0.90,
+  "name": "SimpleRAG retrieval quality benchmark",
+  "version": 3,
+  "minimumRecallAt5": 0.9,
+  "minimumMrrAt10": 0.85,
+  "minimumNdcgAt10": 0.8,
+  "minimumHitRateAt5": 0.9,
+  "minimumRecallAt20": 0.98,
   "cases": [
-    {"id":"zh-en-database","query":"如何连数据库","language":"zh","expectedDocuments":["database-connection.md"],"expectedPassages":["MySQL connection through JDBC"],"mustNotReturn":[],"category":"cross-language"},
-    {"id":"mixed-auth","query":"how to validate 登录 token","language":"mixed","expectedDocuments":["authentication.md"],"expectedPassages":["jwtVerifier.verify"],"mustNotReturn":["database-connection.md"],"category":"mixed-language"},
-    {"id":"code-identifier","query":"request_with_retry TimeoutError","language":"code","expectedDocuments":["retry-and-errors.py"],"expectedPassages":["def request_with_retry"],"mustNotReturn":[],"category":"identifier"},
-    {"id":"exact-config-key","query":"DB_USER DB_PASSWORD maximumPoolSize","language":"code","expectedDocuments":["database-connection.md"],"expectedPassages":["DB_PASSWORD"],"mustNotReturn":[],"category":"exact-key"},
-    {"id":"semantic-ui","query":"怎样收起左边栏给编辑区域更多空间","language":"zh","expectedDocuments":["ui-navigation.md"],"expectedPassages":["sidebar can be collapsed"],"mustNotReturn":[],"category":"cross-language"},
-    {"id":"negative-secret","query":"Never write an access token to application logs","language":"en","expectedDocuments":["authentication.md"],"expectedPassages":["Never write an access token"],"mustNotReturn":["ui-navigation.md"],"category":"sensitive-negative"},
-    {"id":"code-location-natural","query":"接口超时重试相关代码在哪","language":"zh","expectedDocuments":["retry-and-errors.py"],"expectedPassages":["def request_with_retry"],"mustNotReturn":[],"category":"code-location"},
-    {"id":"code-location-symbol","query":"request_with_retry 定义在哪个文件","language":"mixed","expectedDocuments":["retry-and-errors.py"],"expectedPassages":["def request_with_retry"],"mustNotReturn":[],"category":"code-location"}
+    {
+      "id": "zh-en-database",
+      "query": "如何连接数据库",
+      "language": "zh",
+      "expectedDocuments": [
+        "database-connection.md"
+      ],
+      "expectedPassages": [
+        "MySQL connection through JDBC"
+      ],
+      "mustNotReturn": [],
+      "category": "cross-language",
+      "split": "dev",
+      "hardNegatives": [
+        "mysql-migrations.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "mixed-auth",
+      "query": "how to validate 登录 token",
+      "language": "mixed",
+      "expectedDocuments": [
+        "authentication.md"
+      ],
+      "expectedPassages": [
+        "jwtVerifier.verify"
+      ],
+      "mustNotReturn": [],
+      "category": "mixed-language",
+      "split": "test",
+      "hardNegatives": [
+        "access-control.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "code-identifier",
+      "query": "request_with_retry TimeoutError",
+      "language": "code",
+      "expectedDocuments": [
+        "retry-and-errors.py"
+      ],
+      "expectedPassages": [
+        "def request_with_retry"
+      ],
+      "mustNotReturn": [],
+      "category": "identifier",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "exact-config-key",
+      "query": "DB_USER DB_PASSWORD maximumPoolSize",
+      "language": "code",
+      "expectedDocuments": [
+        "database-connection.md"
+      ],
+      "expectedPassages": [
+        "DB_PASSWORD"
+      ],
+      "mustNotReturn": [],
+      "category": "exact-key",
+      "split": "test",
+      "hardNegatives": [
+        "mysql-migrations.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "semantic-ui",
+      "query": "怎样收起左边栏给编辑区域更多空间",
+      "language": "zh",
+      "expectedDocuments": [
+        "ui-navigation.md"
+      ],
+      "expectedPassages": [
+        "sidebar can be collapsed"
+      ],
+      "mustNotReturn": [],
+      "category": "cross-language",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "negative-secret",
+      "query": "Never write an access token to application logs",
+      "language": "en",
+      "expectedDocuments": [
+        "authentication.md"
+      ],
+      "expectedPassages": [
+        "Never write an access token"
+      ],
+      "mustNotReturn": [],
+      "category": "sensitive-negative",
+      "split": "test",
+      "hardNegatives": [
+        "observability.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "code-location-natural",
+      "query": "接口超时重试相关代码在哪",
+      "language": "zh",
+      "expectedDocuments": [
+        "retry-and-errors.py"
+      ],
+      "expectedPassages": [
+        "def request_with_retry"
+      ],
+      "mustNotReturn": [],
+      "category": "code-location",
+      "split": "dev",
+      "hardNegatives": [
+        "api-providers.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "code-location-symbol",
+      "query": "request_with_retry 定义在哪个文件",
+      "language": "mixed",
+      "expectedDocuments": [
+        "retry-and-errors.py"
+      ],
+      "expectedPassages": [
+        "def request_with_retry"
+      ],
+      "mustNotReturn": [],
+      "category": "code-location",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "redis-invalidation",
+      "query": "更新用户资料后怎样让缓存立即失效",
+      "language": "zh",
+      "expectedDocuments": [
+        "redis-cache.md"
+      ],
+      "expectedPassages": [
+        "redis.delete"
+      ],
+      "mustNotReturn": [],
+      "category": "hard-negative",
+      "split": "dev",
+      "hardNegatives": [
+        "database-connection.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "redis-key-ttl",
+      "query": "profile userId 的 TTL 是多少",
+      "language": "mixed",
+      "expectedDocuments": [
+        "redis-cache.md"
+      ],
+      "expectedPassages": [
+        "15 分钟"
+      ],
+      "mustNotReturn": [],
+      "category": "exact-key",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "redis-avalanche",
+      "query": "怎样避免缓存雪崩",
+      "language": "zh",
+      "expectedDocuments": [
+        "redis-cache.md"
+      ],
+      "expectedPassages": [
+        "TTL 抖动"
+      ],
+      "mustNotReturn": [],
+      "category": "semantic",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "hybrid-two-branches",
+      "query": "混合检索有哪两条召回链路",
+      "language": "zh",
+      "expectedDocuments": [
+        "elasticsearch-hybrid.md"
+      ],
+      "expectedPassages": [
+        "BM25 搜索精确术语"
+      ],
+      "mustNotReturn": [],
+      "category": "retrieval-pipeline",
+      "split": "test",
+      "hardNegatives": [
+        "faiss-local.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "rrf-formula",
+      "query": "RRF rank fusion formula k=60",
+      "language": "en",
+      "expectedDocuments": [
+        "elasticsearch-hybrid.md"
+      ],
+      "expectedPassages": [
+        "60 + rank_i"
+      ],
+      "mustNotReturn": [],
+      "category": "exact-key",
+      "split": "dev",
+      "hardNegatives": [
+        "reranking.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "score-scale",
+      "query": "为什么不能直接比较 BM25 和 cosine 分数",
+      "language": "zh",
+      "expectedDocuments": [
+        "elasticsearch-hybrid.md"
+      ],
+      "expectedPassages": [
+        "分数量纲不一致"
+      ],
+      "mustNotReturn": [],
+      "category": "hard-negative",
+      "split": "test",
+      "hardNegatives": [
+        "reranking.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "es-candidate-count",
+      "query": "每条召回链路取多少候选",
+      "language": "zh",
+      "expectedDocuments": [
+        "elasticsearch-hybrid.md"
+      ],
+      "expectedPassages": [
+        "前 50 个候选"
+      ],
+      "mustNotReturn": [],
+      "category": "exact-key",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "faiss-signature",
+      "query": "embedding 模型签名变化后怎么办",
+      "language": "zh",
+      "expectedDocuments": [
+        "faiss-local.md"
+      ],
+      "expectedPassages": [
+        "签名不一致时必须重建"
+      ],
+      "mustNotReturn": [],
+      "category": "semantic",
+      "split": "test",
+      "hardNegatives": [
+        "incremental-index.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "hnsw-efsearch",
+      "query": "efSearch 增大有什么代价",
+      "language": "zh",
+      "expectedDocuments": [
+        "faiss-local.md"
+      ],
+      "expectedPassages": [
+        "查询延迟也会上升"
+      ],
+      "mustNotReturn": [],
+      "category": "tradeoff",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "ann-threshold",
+      "query": "多少 chunks 以下先精确扫描再考虑 ANN",
+      "language": "mixed",
+      "expectedDocuments": [
+        "faiss-local.md"
+      ],
+      "expectedPassages": [
+        "小于十万片段"
+      ],
+      "mustNotReturn": [],
+      "category": "tradeoff",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "cross-encoder-purpose",
+      "query": "cross encoder reranker 为什么比 cosine 更适合精排",
+      "language": "mixed",
+      "expectedDocuments": [
+        "reranking.md"
+      ],
+      "expectedPassages": [
+        "同时读取 query 和 passage"
+      ],
+      "mustNotReturn": [],
+      "category": "reranking",
+      "split": "dev",
+      "hardNegatives": [
+        "elasticsearch-hybrid.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "rerank-pool",
+      "query": "生产配置对 RRF 前多少个候选运行 reranker，最终保留几个片段",
+      "language": "zh",
+      "expectedDocuments": [
+        "reranking.md"
+      ],
+      "expectedPassages": [
+        "最终保留 6 到 8 个片段"
+      ],
+      "mustNotReturn": [],
+      "category": "exact-key",
+      "split": "test",
+      "hardNegatives": [
+        "elasticsearch-hybrid.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "reranker-fallback",
+      "query": "重排模型不可用如何降级",
+      "language": "zh",
+      "expectedDocuments": [
+        "reranking.md"
+      ],
+      "expectedPassages": [
+        "本地特征重排"
+      ],
+      "mustNotReturn": [],
+      "category": "fallback",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "parent-child",
+      "query": "parent child chunking 命中子块后如何补上下文",
+      "language": "mixed",
+      "expectedDocuments": [
+        "chunking-guide.md"
+      ],
+      "expectedPassages": [
+        "扩展到相邻片段或父章节上下文"
+      ],
+      "mustNotReturn": [],
+      "category": "chunking",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "code-ast-chunk",
+      "query": "代码文件应按什么边界切块",
+      "language": "zh",
+      "expectedDocuments": [
+        "chunking-guide.md"
+      ],
+      "expectedPassages": [
+        "class、method、function"
+      ],
+      "mustNotReturn": [],
+      "category": "code-location",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "chunk-metadata",
+      "query": "chunk 必须保留哪些定位元数据",
+      "language": "zh",
+      "expectedDocuments": [
+        "chunking-guide.md"
+      ],
+      "expectedPassages": [
+        "文件路径、符号名称和准确行号"
+      ],
+      "mustNotReturn": [],
+      "category": "chunking",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "mmr-duplicate",
+      "query": "怎样减少同一文档的重复上下文",
+      "language": "zh",
+      "expectedDocuments": [
+        "chunking-guide.md"
+      ],
+      "expectedPassages": [
+        "MMR 与单文档配额"
+      ],
+      "mustNotReturn": [],
+      "category": "retrieval-pipeline",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "prompt-untrusted",
+      "query": "文档里有忽略之前规则的指令怎么办",
+      "language": "zh",
+      "expectedDocuments": [
+        "prompt-security.md"
+      ],
+      "expectedPassages": [
+        "不可信数据"
+      ],
+      "mustNotReturn": [],
+      "category": "prompt-security",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "citation-validation",
+      "query": "如何验证模型生成的引用",
+      "language": "zh",
+      "expectedDocuments": [
+        "prompt-security.md"
+      ],
+      "expectedPassages": [
+        "只来自本轮上下文"
+      ],
+      "mustNotReturn": [],
+      "category": "prompt-security",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "insufficient-evidence",
+      "query": "资料不足时应该怎么回答",
+      "language": "zh",
+      "expectedDocuments": [
+        "prompt-security.md"
+      ],
+      "expectedPassages": [
+        "当前知识库中没有足够信息"
+      ],
+      "mustNotReturn": [],
+      "category": "abstention",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "health-checks",
+      "query": "liveness 和 readiness 检查有什么区别",
+      "language": "en",
+      "expectedDocuments": [
+        "deployment-linux.md"
+      ],
+      "expectedPassages": [
+        "验证 MySQL、Redis 和 Elasticsearch"
+      ],
+      "mustNotReturn": [],
+      "category": "deployment",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "docker-start",
+      "query": "容器部署的启动命令",
+      "language": "zh",
+      "expectedDocuments": [
+        "deployment-linux.md"
+      ],
+      "expectedPassages": [
+        "docker compose up -d"
+      ],
+      "mustNotReturn": [],
+      "category": "exact-command",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "sigterm",
+      "query": "容器收到 SIGTERM 后如何退出",
+      "language": "mixed",
+      "expectedDocuments": [
+        "deployment-linux.md"
+      ],
+      "expectedPassages": [
+        "等待正在执行的索引任务安全结束"
+      ],
+      "mustNotReturn": [],
+      "category": "deployment",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "rag-trace-stages",
+      "query": "RAG trace 需要记录哪些检索阶段",
+      "language": "zh",
+      "expectedDocuments": [
+        "observability.md"
+      ],
+      "expectedPassages": [
+        "BM25、vector search、RRF、rerank"
+      ],
+      "mustNotReturn": [],
+      "category": "observability",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "rag-percentiles",
+      "query": "Prometheus 应记录哪些延迟分位数",
+      "language": "zh",
+      "expectedDocuments": [
+        "observability.md"
+      ],
+      "expectedPassages": [
+        "P50/P95"
+      ],
+      "mustNotReturn": [],
+      "category": "observability",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "log-redaction",
+      "query": "日志里不能记录什么敏感数据",
+      "language": "zh",
+      "expectedDocuments": [
+        "observability.md"
+      ],
+      "expectedPassages": [
+        "API Key、access token"
+      ],
+      "mustNotReturn": [],
+      "category": "sensitive-negative",
+      "split": "test",
+      "hardNegatives": [
+        "authentication.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "provider-profiles",
+      "query": "DeepSeek 和通义千问的配置差异怎么管理",
+      "language": "zh",
+      "expectedDocuments": [
+        "api-providers.md"
+      ],
+      "expectedPassages": [
+        "Provider profile"
+      ],
+      "mustNotReturn": [],
+      "category": "provider",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "rate-limit",
+      "query": "API 返回 429 应该怎么重试",
+      "language": "zh",
+      "expectedDocuments": [
+        "api-providers.md"
+      ],
+      "expectedPassages": [
+        "Retry-After"
+      ],
+      "mustNotReturn": [],
+      "category": "fallback",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "stream-interrupt",
+      "query": "SSE 流式响应中断后如何处理",
+      "language": "zh",
+      "expectedDocuments": [
+        "api-providers.md"
+      ],
+      "expectedPassages": [
+        "不能把不完整回答标记为成功"
+      ],
+      "mustNotReturn": [],
+      "category": "provider",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "incremental-reuse",
+      "query": "增量索引如何识别未变化文件",
+      "language": "zh",
+      "expectedDocuments": [
+        "incremental-index.md"
+      ],
+      "expectedPassages": [
+        "修改时间和 SHA-256"
+      ],
+      "mustNotReturn": [],
+      "category": "incremental-index",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "atomic-publish",
+      "query": "新索引怎样原子发布",
+      "language": "zh",
+      "expectedDocuments": [
+        "incremental-index.md"
+      ],
+      "expectedPassages": [
+        "原子移动"
+      ],
+      "mustNotReturn": [],
+      "category": "incremental-index",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "stale-build",
+      "query": "构建期间数据源变化怎么办",
+      "language": "zh",
+      "expectedDocuments": [
+        "incremental-index.md"
+      ],
+      "expectedPassages": [
+        "丢弃过期结果"
+      ],
+      "mustNotReturn": [],
+      "category": "freshness",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "migration-history",
+      "query": "已执行的 migration 版本存在哪",
+      "language": "zh",
+      "expectedDocuments": [
+        "mysql-migrations.md"
+      ],
+      "expectedPassages": [
+        "schema_history"
+      ],
+      "mustNotReturn": [],
+      "category": "database",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "zero-downtime-column",
+      "query": "生产环境如何无停机变更字段",
+      "language": "zh",
+      "expectedDocuments": [
+        "mysql-migrations.md"
+      ],
+      "expectedPassages": [
+        "expand-migrate-contract"
+      ],
+      "mustNotReturn": [],
+      "category": "database",
+      "split": "test",
+      "hardNegatives": [],
+      "answerable": true
+    },
+    {
+      "id": "acl-before-search",
+      "query": "为什么不能先检索全部文档再隐藏无权结果",
+      "language": "zh",
+      "expectedDocuments": [
+        "access-control.md"
+      ],
+      "expectedPassages": [
+        "检索前"
+      ],
+      "mustNotReturn": [],
+      "category": "authorization",
+      "split": "dev",
+      "hardNegatives": [
+        "authentication.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "admin-source",
+      "query": "管理员权限应该从哪里读取",
+      "language": "zh",
+      "expectedDocuments": [
+        "access-control.md"
+      ],
+      "expectedPassages": [
+        "token claims"
+      ],
+      "mustNotReturn": [],
+      "category": "authorization",
+      "split": "test",
+      "hardNegatives": [
+        "authentication.md"
+      ],
+      "answerable": true
+    },
+    {
+      "id": "acl-actions",
+      "query": "哪些操作需要分别鉴权",
+      "language": "zh",
+      "expectedDocuments": [
+        "access-control.md"
+      ],
+      "expectedPassages": [
+        "知识库管理、索引重建和远程发送"
+      ],
+      "mustNotReturn": [],
+      "category": "authorization",
+      "split": "dev",
+      "hardNegatives": [],
+      "answerable": true
+    }
   ]
 }

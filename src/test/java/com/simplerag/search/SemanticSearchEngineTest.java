@@ -14,7 +14,7 @@ public final class SemanticSearchEngineTest {
         SemanticSearchEngine engine = new SemanticSearchEngine(new Langchain4jOnnxEmbeddingProvider());
         SemanticSearchEngine.IndexReport report = engine.index(List.of(knowledge), null);
 
-        check(report.files() == 5, "应索引 5 个示例文件");
+        check(report.files() >= 17, "应索引扩展后的示例语料");
         check(report.chunks() >= 4, "每个文件至少生成一个片段");
 
         List<SearchResult> database = engine.search("如何连数据库", 5, "全部");
@@ -34,7 +34,8 @@ public final class SemanticSearchEngineTest {
         check(!retryLocation.isEmpty() && retryLocation.get(0).chunk().fileName().equals("retry-and-errors.py"),
                 "代码定位问题应去除泛化问法并优先返回相关代码文件");
         check(retryLocation.get(0).reason().contains("代码") || retryLocation.get(0).reason().contains("路径")
-                        || retryLocation.get(0).reason().contains("语义"),
+                        || retryLocation.get(0).reason().contains("语义")
+                        || retryLocation.get(0).reason().contains("RRF"),
                 "代码定位结果应给出可解释的命中原因");
 
         List<SearchResult> symbolLocation = engine.search("request_with_retry 定义在哪个文件", 5, "全部");
@@ -45,8 +46,8 @@ public final class SemanticSearchEngineTest {
             List<SearchResult> navigation = engine.search("怎样收起左边栏给编辑区域更多空间", 5, "全部");
             check(!navigation.isEmpty() && navigation.get(0).chunk().fileName().equals("ui-navigation.md"),
                     "模型应跨语言命中未写入概念词典的界面描述");
-            check(navigation.get(0).reason().equals("向量语义匹配"),
-                    "跨语言结果必须来自真实向量语义评分");
+            check(navigation.get(0).reason().contains("RRF"),
+                    "默认检索应使用 BM25 与向量 RRF 融合并经过重排");
             List<SemanticHighlight> highlights = engine.semanticHighlights(
                     "怎样收起左边栏给编辑区域更多空间", navigation.get(0).chunk(), 2);
             check(!highlights.isEmpty(), "向量结果应能定位到具体语义片段");

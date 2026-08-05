@@ -89,12 +89,31 @@ final class IterativeRetrieval {
             if (result == null || result.chunk() == null) continue;
             DocumentChunk chunk = result.chunk();
             String key = chunk.id() + "\u0000" + chunk.path() + "\u0000" + chunk.sourceLocation();
-            if (collected.containsKey(key)) continue;
+            if (collected.containsKey(key) || overlapsCollected(collected, chunk)) continue;
+            long documentCitations = collected.values().stream()
+                    .filter(candidate -> candidate.chunk().path().equals(chunk.path())).count();
+            if (documentCitations >= 3) continue;
             collected.put(key, new Candidate(chunk, result.score()));
             added++;
             if (added >= limit || collected.size() >= MAX_CITATIONS) break;
         }
         return added;
+    }
+
+
+    private static boolean overlapsCollected(Map<String, Candidate> collected, DocumentChunk chunk) {
+        for (Candidate candidate : collected.values()) {
+            DocumentChunk existing = candidate.chunk();
+            if (!existing.path().equals(chunk.path())) continue;
+            int overlapStart = Math.max(existing.startLine(), chunk.startLine());
+            int overlapEnd = Math.min(existing.endLine(), chunk.endLine());
+            if (overlapEnd < overlapStart) continue;
+            int overlap = overlapEnd - overlapStart + 1;
+            int shorter = Math.max(1, Math.min(existing.endLine() - existing.startLine() + 1,
+                    chunk.endLine() - chunk.startLine() + 1));
+            if (overlap / (double) shorter >= 0.5) return true;
+        }
+        return false;
     }
 
     private static List<RagCitation> numbered(Map<String, Candidate> collected) {

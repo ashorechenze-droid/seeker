@@ -81,7 +81,7 @@ public final class AskUseCase implements AskKnowledge {
         AtomicBoolean authorized = new AtomicBoolean();
         IterativeRetrieval.Result retrieved = retrieval.collect(handle.knowledgeBaseId(), handle.sourceRevision(),
                 question, safeHistory, config,
-                query -> handle.engine().search(query, 8, "\u5168\u90e8"),
+                query -> handle.engine().searchContext(query, 8, "\u5168\u90e8"),
                 scope -> publishScope(knowledgeBase, expectedRevision, config, scope,
                         onCitations, authorizer, authorized),
                 () -> freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision()));

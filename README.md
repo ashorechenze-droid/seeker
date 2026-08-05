@@ -167,6 +167,14 @@ mvn.cmd -q -DskipTests package
 
 报告写入 `target/performance/performance-report.json`。2026-07-12 在 Windows 11、Java 17.0.8、16 logical processors、固定 `examples/knowledge` 数据集上，模型签名完整 hash 为 115.5649 ms，缓存命中为 23.7596 ms（4.86x），且签名等价。
 
+## 检索质量评测
+
+默认排序策略已升级为 RankingPolicy v3：BM25 与 dense vector 各自独立召回最多 50 个候选，使用 k=60 的 RRF 合并，再对前 20 个候选执行第二阶段重排。当前 FeatureReranker 完全本地、确定性且无需下载额外模型；SecondStageReranker 接口可替换为后续 ONNX Cross-Encoder。
+
+运行 RetrievalEvaluationMain 会基于 45 条中英混合基准生成 target/evaluation/retrieval-report.json 和 retrieval-ablation.json。数据集覆盖精确标识符、跨语言语义、hard negatives、重排、分块、安全、部署与权限；报告 BM25、dense、RRF、RRF + reranker 的 Recall@5/20、HitRate@5、Precision@5、MRR@10、nDCG@10、分类指标、文档多样性及 P50/P95 延迟。
+
+Chunking v3 对说明文档使用约 320 token 的窗口和 40 token 重叠，对源码优先按 class/method/function 等声明边界切分并保留符号与行号。问答上下文再经过 MMR、单文档配额、重叠范围过滤以及相邻父章节扩展，减少重复证据。
+
 ## 索引状态
 
 | 状态 | 含义 | 向量检索 | 远程 RAG |

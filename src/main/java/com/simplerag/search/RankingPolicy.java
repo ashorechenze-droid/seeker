@@ -8,7 +8,7 @@ public record RankingPolicy(
         int version
 ) {
     public static RankingPolicy defaultPolicy() {
-        return new RankingPolicy(0.78, 0.22, 0.22, 0.045, 2);
+        return new RankingPolicy(0.78, 0.22, 0.22, 0.045, 3);
     }
 
     public double combine(double semanticScore, double lexicalScore, boolean semanticAvailable) {

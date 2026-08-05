@@ -255,7 +255,7 @@ public final class IncrementalIndexBuilder {
             List<float[]> vectors;
             try {
                 vectors = embedder.embed(batch.stream()
-                        .map(chunk -> chunk.fileName() + "\n" + chunk.content()).toList());
+                        .map(chunk -> chunk.fileName() + "\n" + chunk.sourceLocation() + "\n" + chunk.content()).toList());
             } catch (IOException failure) {
                 throw new IOException("生成本地语义向量失败：" + failure.getMessage(), failure);
             }

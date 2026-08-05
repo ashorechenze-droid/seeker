@@ -34,6 +34,8 @@ public final class SemanticSearchEngine {
     private final LexicalFeatureExtractor lexicalFeatures;
     private final QueryAnalyzer queryAnalyzer;
     private final LexicalScorer lexicalScorer;
+    private final RetrievalPipeline retrievalPipeline;
+    private final ContextSelector contextSelector;
     private final SemanticHighlightService highlightService;
     private final SemanticScorer semanticScorer;
     private final RankingPolicy rankingPolicy;
@@ -83,6 +85,8 @@ public final class SemanticSearchEngine {
         this.lexicalFeatures = lexicalFeatures;
         this.queryAnalyzer = new QueryAnalyzer(lexicalFeatures);
         this.lexicalScorer = new LexicalScorer(lexicalFeatures);
+        this.retrievalPipeline = new RetrievalPipeline(semanticScorer, lexicalScorer, new FeatureReranker());
+        this.contextSelector = new ContextSelector();
         this.highlightService = new SemanticHighlightService(embeddingProvider, semanticScorer);
         this.semanticScorer = semanticScorer;
         this.rankingPolicy = rankingPolicy;
@@ -108,57 +112,46 @@ public final class SemanticSearchEngine {
     }
 
     public List<SearchResult> search(String query, int limit, String extensionFilter) {
-        State current = state;
-        QueryAnalyzer.AnalyzedQuery analyzed = queryAnalyzer.analyze(query, current.documentFrequency, current.chunks.size());
-        String cleaned = analyzed.text();
-        if (analyzed.empty()) {
-            return List.of();
-        }
-        Map<String, Double> queryTokens = analyzed.tokens();
-        if (queryTokens.isEmpty() && !semanticCompatible) {
-            return List.of();
-        }
-        float[] semanticQuery = null;
-        if (semanticCompatible) {
-            try {
-                semanticQuery = semanticQuery(analyzed.semanticText());
-                if (!semanticScorer.queryCompatible(semanticQuery,
-                        current.chunks.stream().map(item -> item.chunk).toList())) semanticQuery = null;
-                embeddingsActive = semanticQuery != null;
-            } catch (IOException failure) {
-                embeddingsActive = false;
-                diagnostics.record("vector fallback reason", "retrieval", failure.getClass().getSimpleName(),
-                        Map.of("reason", failure.getMessage() == null ? "embedding failed" : failure.getMessage()));
-            }
-        }
+        return search(query, limit, extensionFilter, RetrievalStrategy.RRF_RERANK);
+    }
 
-        List<SearchResult> results = new ArrayList<>();
-        for (IndexedChunk indexed : current.chunks) {
-            DocumentChunk chunk = indexed.chunk;
-            if (extensionFilter != null && !extensionFilter.isBlank() && !"全部".equals(extensionFilter)
-                    && !chunk.extension().equalsIgnoreCase(extensionFilter)) {
-                continue;
-            }
-            LexicalScorer.Score lexical = lexicalScorer.score(analyzed, chunk,
-                    indexed.tokens, indexed.vector, indexed.norm);
-            double lexicalScore = lexical.value();
-            double semanticScore = semanticQuery != null && chunk.hasEmbedding()
-                    ? Math.max(0.0, semanticScorer.score(semanticQuery, chunk.embedding())) : 0.0;
-            double score = rankingPolicy.combine(semanticScore, lexicalScore, semanticQuery != null,
-                    analyzed.metadataFocused());
-            if (lexicalScore >= rankingPolicy.lexicalResultThreshold()
-                    || semanticScore >= rankingPolicy.semanticResultThreshold()) {
-                String reason = lexical.declarationMatch() ? "代码定义匹配"
-                        : lexical.metadataMatch() && analyzed.locationIntent() ? "文件路径匹配"
-                        : semanticScore >= rankingPolicy.semanticResultThreshold() && semanticScore >= lexicalScore
-                        ? "向量语义匹配" : lexical.conceptMatches() > 0 ? "语义概念匹配"
-                        : lexical.exactMatch() ? "原文匹配" : "内容相似";
-                results.add(new SearchResult(chunk, Math.min(1.0, score), reason));
-            }
+    /** Search entry point used by the evaluation harness for reproducible ablations. */
+    public List<SearchResult> search(String query, int limit, String extensionFilter,
+                                     RetrievalStrategy strategy) {
+        State current = state;
+        QueryAnalyzer.AnalyzedQuery analyzed = queryAnalyzer.analyze(query,
+                current.documentFrequency, current.documents.size());
+        if (analyzed.empty()) return List.of();
+        RetrievalStrategy selected = strategy == null ? RetrievalStrategy.RRF_RERANK : strategy;
+        if (analyzed.tokens().isEmpty() && (!semanticCompatible || !selected.usesDense())) return List.of();
+        float[] semanticQuery = selected.usesDense() ? prepareSemanticQuery(analyzed, current) : null;
+        return retrievalPipeline.search(analyzed, current.documents, current.documentFrequency,
+                semanticQuery, limit, extensionFilter, selected);
+    }
+
+    /** Search plus MMR, per-document quotas and parent/adjacent context expansion for generation. */
+    public List<SearchResult> searchContext(String query, int limit, String extensionFilter) {
+        int candidateLimit = Math.max(20, limit * 4);
+        List<SearchResult> ranked = search(query, candidateLimit, extensionFilter,
+                RetrievalStrategy.RRF_RERANK);
+        return contextSelector.select(ranked,
+                state.documents.stream().map(RetrievalDocument::chunk).toList(), limit);
+    }
+
+    private float[] prepareSemanticQuery(QueryAnalyzer.AnalyzedQuery analyzed, State current) {
+        if (!semanticCompatible) return null;
+        try {
+            float[] query = semanticQuery(analyzed.semanticText());
+            if (!semanticScorer.queryCompatible(query,
+                    current.documents.stream().map(RetrievalDocument::chunk).toList())) return null;
+            embeddingsActive = true;
+            return query;
+        } catch (IOException failure) {
+            embeddingsActive = false;
+            diagnostics.record("vector fallback reason", "retrieval", failure.getClass().getSimpleName(),
+                    Map.of("reason", failure.getMessage() == null ? "embedding failed" : failure.getMessage()));
+            return null;
         }
-        results.sort(Comparator.comparingDouble(SearchResult::score).reversed()
-                .thenComparing(result -> result.chunk().fileName()));
-        return results.size() <= limit ? results : List.copyOf(results.subList(0, limit));
     }
 
     public List<SemanticHighlight> semanticHighlights(String query, DocumentChunk chunk, int limit)
@@ -178,7 +171,7 @@ public final class SemanticSearchEngine {
     }
 
     public IndexSnapshot snapshot() {
-        List<DocumentChunk> chunks = state.chunks.stream().map(indexed -> indexed.chunk).toList();
+        List<DocumentChunk> chunks = state.documents.stream().map(RetrievalDocument::chunk).toList();
         return new IndexSnapshot(IndexSnapshot.CURRENT_VERSION, roots, chunks, indexedAt,
                 state.hasEmbeddings ? embeddingProvider.modelName() : "", manifest, documentEntries);
     }
@@ -193,15 +186,15 @@ public final class SemanticSearchEngine {
     }
 
     public int chunkCount() {
-        return state.chunks.size();
+        return state.documents.size();
     }
 
     public int fileCount() {
-        return (int) state.chunks.stream().map(indexed -> indexed.chunk.path()).distinct().count();
+        return (int) state.documents.stream().map(indexed -> indexed.chunk().path()).distinct().count();
     }
 
     public Set<String> extensions() {
-        return state.chunks.stream().map(indexed -> indexed.chunk.extension())
+        return state.documents.stream().map(indexed -> indexed.chunk().extension())
                 .filter(value -> !value.isBlank()).collect(Collectors.toCollection(java.util.TreeSet::new));
     }
 
@@ -232,7 +225,7 @@ public final class SemanticSearchEngine {
 
     private boolean isSemanticCompatible(IndexSnapshot snapshot) {
         return state.hasEmbeddings && semanticScorer.compatible(embeddingProvider, snapshot.manifest(),
-                state.chunks.stream().map(item -> item.chunk).toList());
+                state.documents.stream().map(RetrievalDocument::chunk).toList());
     }
 
     private static void checkInterrupted() throws InterruptedIOException {
@@ -274,11 +267,7 @@ public final class SemanticSearchEngine {
         }
     }
 
-    private record IndexedChunk(DocumentChunk chunk, Map<String, Double> tokens,
-                                Map<String, Double> vector, double norm) {
-    }
-
-    private record State(List<IndexedChunk> chunks, Map<String, Integer> documentFrequency,
+    private record State(List<RetrievalDocument> documents, Map<String, Integer> documentFrequency,
                          boolean hasEmbeddings) {
         static State empty() {
             return new State(List.of(), Map.of(), false);
@@ -286,14 +275,18 @@ public final class SemanticSearchEngine {
 
         static State build(List<DocumentChunk> source, LexicalFeatureExtractor features) {
             List<Map<String, Double>> tokenMaps = source.stream()
-                    .map(chunk -> features.weightedTokens(chunk.fileName() + "\n" + chunk.content(), false)).toList();
+                    .map(chunk -> features.weightedTokens(chunk.fileName() + "\n"
+                            + chunk.sourceLocation() + "\n" + chunk.content(), false)).toList();
             Map<String, Integer> df = new HashMap<>();
-            tokenMaps.forEach(tokens -> new HashSet<>(tokens.keySet()).forEach(token -> df.merge(token, 1, Integer::sum)));
-            List<IndexedChunk> indexed = new ArrayList<>(source.size());
+            tokenMaps.forEach(tokens -> new HashSet<>(tokens.keySet())
+                    .forEach(token -> df.merge(token, 1, Integer::sum)));
+            List<RetrievalDocument> indexed = new ArrayList<>(source.size());
             for (int i = 0; i < source.size(); i++) {
                 Map<String, Double> tokens = tokenMaps.get(i);
                 Map<String, Double> vector = features.tfIdf(tokens, df, source.size());
-                indexed.add(new IndexedChunk(source.get(i), tokens, vector, features.norm(vector)));
+                double length = tokens.values().stream().mapToDouble(Double::doubleValue).sum();
+                indexed.add(new RetrievalDocument(source.get(i), tokens, vector,
+                        features.norm(vector), Math.max(1.0, length)));
             }
             boolean hasEmbeddings = source.stream().anyMatch(DocumentChunk::hasEmbedding);
             return new State(List.copyOf(indexed), Map.copyOf(df), hasEmbeddings);

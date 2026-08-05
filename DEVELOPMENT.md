@@ -875,3 +875,13 @@ JUnit/ArchUnit 共 79 项通过。新增 `IndexStoreSecurityTest`（3 项）；`
 
 新增类全部位于 `..search..` 包内并复用既有的 `IndexBuildWarning` 上报通道，未新增依赖、未改动 port 接口，因此现有 ArchUnit 规则无需放宽。
 
+
+## 24. 混合检索、重排与分块 v3（2026-08-05）
+
+检索链路拆为独立 BM25 和 dense candidate generators。两路各取最多 50 个候选，以 RRF k=60 融合；默认策略 RRF_RERANK 再把前 20 个候选交给 SecondStageReranker。当前 FeatureReranker 综合归一化 BM25、dense、RRF、文件元数据、声明与代码意图信号，不需要远程服务；接口保留了替换 ONNX Cross-Encoder 的边界。SemanticSearchEngine 暴露 BM25、DENSE、RRF、RRF_RERANK 四种策略供同语料消融。
+
+ChunkerRegistry.CHUNKING_VERSION 提升到 3。普通文档以约 320 token 为目标、40 token 重叠并优先在自然段边界结束；代码识别 class/interface/record/enum、常见函数和方法以及 JavaScript arrow function 声明，长符号才退化到 token 窗口。embedding 输入增加 fileName 和 sourceLocation，使文件名、父章节、符号与行号参与语义表示。
+
+ContextSelector 在生成上下文前执行 MMR，多样性选择中每个文档最多两个片段；随后按同父章节扩展相邻块，拒绝重叠行号并把单个扩展上下文限制为 2800 字符。IterativeRetrieval 额外拒绝同文件重叠达到 50% 的引用范围，且每个文档最多累计三个引用。
+
+评测集扩到 45 条并增加 dev/test、category、hard negatives 和 answerable 字段。报告新增 Recall@20、HitRate@5、Precision@5、文档唯一率、分类聚合、hard-negative 排序信号和 P50/P95；RetrievalEvaluationMain 同时输出默认策略报告和四策略消融报告。本机真实 ONNX 门禁结果为 Recall@5 1.000、Recall@20 1.000、HitRate@5 1.000、MRR@10 1.000、nDCG@10 0.956。
