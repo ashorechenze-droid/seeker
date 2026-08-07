@@ -88,6 +88,11 @@ public final class AskUseCase implements AskKnowledge {
         List<RagCitation> citations = retrieved.citations();
 
         freshnessGate.requireFresh(handle.knowledgeBaseId(), handle.sourceRevision());
+        // Retrieval found nothing. Calling the model anyway would send a question with no evidence and
+        // fail inside the adapter, surfacing a raw argument error instead of an honest abstention.
+        if (citations.isEmpty()) {
+            return abstain(knowledgeBaseId, expectedRevision, retrieved, onDelta);
+        }
         List<CitationView> views = citations.stream().map(AskUseCase::toView).toList();
         ChatRequest request = new ChatRequest(handle.knowledgeBaseId(), handle.sourceRevision(),
                 question, safeHistory, citations);
@@ -100,6 +105,25 @@ public final class AskUseCase implements AskKnowledge {
                         "completionTokens", Integer.toString(turnUsage.completionTokens()),
                         "totalTokens", Integer.toString(turnUsage.totalTokens())));
         return new AskResultView(answer.text(), views, answer.model(), turnUsage);
+    }
+
+    /**
+     * Reports "nothing was found" as a normal answer with no citations. The message distinguishes a
+     * genuinely empty result from one where retrieval planning never ran, because the remedy differs:
+     * rephrase the question, versus check the chat API configuration.
+     */
+    private AskResultView abstain(String knowledgeBaseId, long revision, IterativeRetrieval.Result retrieved,
+                                  Consumer<String> onDelta) {
+        String message = retrieved.plannerUnavailable()
+                ? "当前知识库中没有检索到相关内容，且自动检索规划不可用（远程模型未响应或返回了无法解析的结果），"
+                        + "因此没有尝试改写检索词。请检查对话模型配置，或换用更具体的关键词重新提问。"
+                : "当前知识库中没有检索到与该问题相关的内容。已尝试自动改写检索词但仍无命中，"
+                        + "请换用文档中可能出现的术语（例如具体的类名、方法名、配置键或文件名）重新提问。";
+        diagnostics.record("RAG abstained", "retrieval", "no citations",
+                Map.of("knowledgeBaseId", knowledgeBaseId, "revision", Long.toString(revision),
+                        "plannerUnavailable", Boolean.toString(retrieved.plannerUnavailable())));
+        if (onDelta != null) onDelta.accept(message);
+        return new AskResultView(message, List.of(), null, retrieved.usage());
     }
 
     private boolean localOnly(String knowledgeBaseId) {

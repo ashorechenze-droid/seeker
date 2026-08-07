@@ -1,6 +1,7 @@
 package com.simplerag.application.usecase;
 
 import com.simplerag.application.conversation.ChatMessage;
+import com.simplerag.application.conversation.ConversationQueryResolver;
 import com.simplerag.application.conversation.RetrievalAttempt;
 import com.simplerag.application.conversation.RetrievalDecision;
 import com.simplerag.application.conversation.RetrievalPlanRequest;
@@ -33,8 +34,16 @@ final class IterativeRetrieval {
         this.chat = chat;
     }
 
-    /** Citations gathered for the turn, plus what the planning rounds actually cost. */
-    record Result(List<RagCitation> citations, TokenUsage usage) { }
+    /**
+     * Citations gathered for the turn, what the planning rounds cost, and whether planning actually
+     * ran. {@code plannerUnavailable} lets the caller tell "the model was satisfied" apart from
+     * "we never got a decision", which matters when the evidence set is thin or empty.
+     */
+    record Result(List<RagCitation> citations, TokenUsage usage, boolean plannerUnavailable) {
+        Result(List<RagCitation> citations, TokenUsage usage) {
+            this(citations, usage, false);
+        }
+    }
 
     Result collect(String knowledgeBaseId, long sourceRevision, String question,
                    List<ChatMessage> history, ApiConfig config,
@@ -45,8 +54,12 @@ final class IterativeRetrieval {
         Map<String, Candidate> collected = new LinkedHashMap<>();
         List<RetrievalAttempt> attempts = new ArrayList<>();
         TokenUsage usage = TokenUsage.UNKNOWN;
-        int initialAdded = addResults(collected, search.apply(question), INITIAL_CITATIONS);
-        attempts.add(new RetrievalAttempt(question, initialAdded));
+        boolean plannerUnavailable = false;
+        // A pronoun-only follow-up ("它在哪？") carries nothing to retrieve on, and the planner cannot
+        // help yet: it only runs after the user authorises the send. Resolve references locally first.
+        String initialQuery = ConversationQueryResolver.resolve(question, history);
+        int initialAdded = addResults(collected, search.apply(initialQuery), INITIAL_CITATIONS);
+        attempts.add(new RetrievalAttempt(initialQuery, initialAdded));
         List<RagCitation> citations = numbered(collected);
         onCitationScopeChanged.accept(citations);
 
@@ -62,24 +75,46 @@ final class IterativeRetrieval {
             } catch (IOException plannerUnreachable) {
                 // Planning is an optimisation. Losing it costs recall; letting it abort the turn would
                 // cost the answer entirely, so fall back to the evidence already collected.
+                plannerUnavailable = true;
                 break;
             }
-            if (decision == null) break;
+            if (decision == null) {
+                plannerUnavailable = true;
+                break;
+            }
             // A planning round is billed even when it decides to stop searching.
             usage = usage.plus(decision.usage());
+            if (decision.plannerUnavailable()) {
+                plannerUnavailable = true;
+                break;
+            }
             if (!decision.shouldSearch()) break;
 
-            String query = decision.query();
-            if (alreadyTried(attempts, query)) break;
-            int added = addResults(collected, search.apply(query), FOLLOW_UP_CITATIONS);
-            attempts.add(new RetrievalAttempt(query, added));
-            if (added > 0) {
+            // The model may generate several queries for one round. Running them all before the next
+            // planning call turns a purely sequential loop into a bounded fan-out, so a question with
+            // two independent facets no longer needs two round trips to cover both.
+            int addedThisRound = 0;
+            boolean searchedThisRound = false;
+            for (String query : decision.queries()) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("Question answering was cancelled");
+                }
+                if (alreadyTried(attempts, query)) continue;
+                searchedThisRound = true;
+                int added = addResults(collected, search.apply(query), FOLLOW_UP_CITATIONS);
+                attempts.add(new RetrievalAttempt(query, added));
+                addedThisRound += added;
+                if (collected.size() >= MAX_CITATIONS) break;
+            }
+            // Every generated query was a repeat: the model has stopped making progress.
+            if (!searchedThisRound) break;
+            if (addedThisRound > 0) {
                 citations = numbered(collected);
                 onCitationScopeChanged.accept(citations);
             }
             if (collected.size() >= MAX_CITATIONS) break;
         }
-        return new Result(citations, usage);
+        return new Result(citations, usage, plannerUnavailable);
     }
 
     private static int addResults(Map<String, Candidate> collected, List<SearchResult> results, int limit) {

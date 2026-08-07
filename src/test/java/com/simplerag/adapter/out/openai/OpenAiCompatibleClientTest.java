@@ -65,6 +65,91 @@ class OpenAiCompatibleClientTest {
     }
 
     @Test
+    void plannerGeneratesSeveralQueriesForAMultiFacetQuestion() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":"
+                    + "\"{\\\"action\\\":\\\"search\\\",\\\"queries\\\":[\\\"IterativeRetrieval collect\\\","
+                    + "\\\"planRetrieval callers\\\",\\\"IterativeRetrieval collect\\\"]}\"}}]}");
+        });
+        server.start();
+        try {
+            ApiConfig config = new ApiConfig("http://127.0.0.1:" + server.getAddress().getPort() + "/v1",
+                    "secret", "model");
+            DocumentChunk chunk = new DocumentChunk("c1", "src/AskUseCase.java", "src", "AskUseCase.java",
+                    ".java", 60, 90, "evidence", 1L, null);
+            RetrievalPlanRequest request = new RetrievalPlanRequest("kb", 2L, "how does planning work?", List.of(),
+                    List.of(new RagCitation(1, chunk, 0.42)),
+                    List.of(new RetrievalAttempt("how does planning work?", 1)), 3);
+
+            RetrievalDecision decision = new OpenAiCompatibleClient().planRetrieval(config, request);
+
+            assertTrue(decision.shouldSearch());
+            // The duplicate the model emitted is dropped; the two distinct facets survive.
+            assertEquals(List.of("IterativeRetrieval collect", "planRetrieval callers"), decision.queries());
+            // The planner needs the relevance score to judge "related but not sufficient".
+            assertTrue(requestBody.get().contains("relevance 0.42"));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void aTruncatedPlannerResponseIsReportedAsUnavailableRatherThanAsAnAnswer() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange ->
+                // Valid JSON, but the provider cut generation at the token ceiling: the query list is
+                // complete-looking yet unfinished, so the decision must not be trusted.
+                respond(exchange, "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                        + "\"{\\\"action\\\":\\\"search\\\",\\\"queries\\\":[\\\"partial\\\"]}\"}}]}"));
+        server.start();
+        try {
+            ApiConfig config = new ApiConfig("http://127.0.0.1:" + server.getAddress().getPort() + "/v1",
+                    "secret", "model");
+            RetrievalPlanRequest request = new RetrievalPlanRequest("kb", 1L, "q", List.of(), List.of(),
+                    List.of(new RetrievalAttempt("q", 0)), 3);
+
+            RetrievalDecision decision = new OpenAiCompatibleClient().planRetrieval(config, request);
+
+            assertFalse(decision.shouldSearch());
+            assertTrue(decision.plannerUnavailable());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void prosePlannerResponseIsUnavailableWhileAnExplicitAnswerStaysAnAnswer() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange ->
+                respond(exchange, "{\"choices\":[{\"message\":{\"content\":\"I think we have enough.\"}}]}"));
+        HttpServer decided = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        decided.createContext("/v1/chat/completions", exchange ->
+                respond(exchange, "{\"choices\":[{\"message\":{\"content\":\"{\\\"action\\\":\\\"answer\\\"}\"}}]}"));
+        server.start();
+        decided.start();
+        try {
+            RetrievalPlanRequest request = new RetrievalPlanRequest("kb", 1L, "q", List.of(), List.of(),
+                    List.of(new RetrievalAttempt("q", 0)), 3);
+
+            RetrievalDecision prose = new OpenAiCompatibleClient().planRetrieval(
+                    new ApiConfig("http://127.0.0.1:" + server.getAddress().getPort() + "/v1", "k", "m"), request);
+            RetrievalDecision answer = new OpenAiCompatibleClient().planRetrieval(
+                    new ApiConfig("http://127.0.0.1:" + decided.getAddress().getPort() + "/v1", "k", "m"), request);
+
+            // Unparseable prose is a planner failure; only an explicit action:answer means "sufficient".
+            assertTrue(prose.plannerUnavailable());
+            assertFalse(answer.plannerUnavailable());
+            assertFalse(answer.shouldSearch());
+        } finally {
+            server.stop(0);
+            decided.stop(0);
+        }
+    }
+
+    @Test
     void streamedAnswerReportsTheProvidersRealUsageAndCalibratesTheEstimator() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);

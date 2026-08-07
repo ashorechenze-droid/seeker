@@ -51,7 +51,9 @@ public final class OpenAiCompatibleReranker implements SecondStageReranker {
             current.validate();
             ObjectNode payload = json.createObjectNode();
             payload.put("model", current.model());
-            payload.put("query", query.text());
+            // Recall runs on the cleaned subject, so ranking must too. Sending the raw text fed the
+            // cross-encoder boilerplate ("请帮我找…在哪") that dilutes the actual query terms.
+            payload.put("query", rerankQuery(query));
             payload.put("top_n", Math.min(limit, candidates.size()));
             ArrayNode documents = payload.putArray("documents");
             candidates.forEach(candidate -> documents.add(candidate.document().chunk().fileName() + "\n"
@@ -132,5 +134,14 @@ public final class OpenAiCompatibleReranker implements SecondStageReranker {
         return -1;
     }
 
-    private static double clamp(double value) { return Math.max(0, Math.min(1, value)); }
+    private static String rerankQuery(QueryAnalyzer.AnalyzedQuery query) {
+        String semantic = query.semanticText();
+        return semantic == null || semantic.isBlank() ? query.text() : semantic;
+    }
+
+    /** Rejects NaN and infinities before they reach the comparator and make ordering undefined. */
+    private static double clamp(double value) {
+        if (Double.isNaN(value)) return 0;
+        return Math.max(0, Math.min(1, value));
+    }
 }

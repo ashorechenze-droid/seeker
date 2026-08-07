@@ -1,5 +1,6 @@
 package com.simplerag.application.usecase;
 
+import com.simplerag.application.conversation.ChatMessage;
 import com.simplerag.application.conversation.ChatRequest;
 import com.simplerag.application.conversation.RetrievalDecision;
 import com.simplerag.application.conversation.RetrievalPlanRequest;
@@ -18,6 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IterativeRetrievalTest {
     private static final ApiConfig CONFIG = new ApiConfig("https://example.test/v1", "key", "model");
@@ -48,6 +51,85 @@ class IterativeRetrievalTest {
                 result.citations().stream().map(citation -> citation.chunk().id()).toList());
         assertEquals(List.of(1, 2, 3, 4), result.citations().stream().map(RagCitation::number).toList());
         assertEquals(List.of(2, 3, 4), chat.evidenceSizes);
+    }
+
+    @Test
+    void severalGeneratedQueriesRunInOneRoundBeforeTheNextPlanningCall() throws Exception {
+        // Two independent facets must not cost two planning round trips.
+        PlanningChat chat = new PlanningChat(List.of(
+                RetrievalDecision.search(List.of("QueryAnalyzer semanticText", "BOILERPLATE pattern")),
+                RetrievalDecision.answer()));
+        IterativeRetrieval retrieval = new IterativeRetrieval(chat);
+        List<String> queries = new ArrayList<>();
+
+        IterativeRetrieval.Result result = retrieval.collect("kb", 1L, "how is the query cleaned?", List.of(), CONFIG,
+                query -> {
+                    queries.add(query);
+                    if (query.startsWith("QueryAnalyzer")) return List.of(hit("c2", 0.9));
+                    if (query.startsWith("BOILERPLATE")) return List.of(hit("c3", 0.8));
+                    return List.of(hit("c1", 1.0));
+                }, ignored -> { }, () -> { });
+
+        assertEquals(List.of("how is the query cleaned?", "QueryAnalyzer semanticText", "BOILERPLATE pattern"),
+                queries);
+        assertEquals(List.of("c1", "c2", "c3"),
+                result.citations().stream().map(citation -> citation.chunk().id()).toList());
+        // Both queries ran inside a single planning round, so the planner was consulted twice overall.
+        assertEquals(2, chat.evidenceSizes.size());
+    }
+
+    @Test
+    void aPronounOnlyFollowUpIsResolvedAgainstThePreviousQuestionBeforeTheFirstSearch() throws Exception {
+        // The planner cannot help here: it only runs after the user authorises the send, so a bare
+        // "它在哪？" would otherwise be sent to the index verbatim and match nothing.
+        IterativeRetrieval retrieval = new IterativeRetrieval(new PlanningChat(List.of(RetrievalDecision.answer())));
+        List<String> queries = new ArrayList<>();
+        List<ChatMessage> history = List.of(
+                ChatMessage.user("FreshnessGate 是怎么校验索引版本的？"),
+                ChatMessage.assistant("它在 requireFresh 中比较 sourceRevision。"));
+
+        retrieval.collect("kb", 1L, "它在哪？", history, CONFIG,
+                query -> {
+                    queries.add(query);
+                    return List.of(hit("c1", 0.9));
+                }, ignored -> { }, () -> { });
+
+        assertEquals(1, queries.size());
+        assertTrue(queries.get(0).contains("FreshnessGate"),
+                "the follow-up should carry the subject of the previous turn");
+        assertTrue(queries.get(0).contains("它在哪？"));
+    }
+
+    @Test
+    void aSelfContainedQuestionIsSearchedVerbatim() throws Exception {
+        IterativeRetrieval retrieval = new IterativeRetrieval(new PlanningChat(List.of(RetrievalDecision.answer())));
+        List<String> queries = new ArrayList<>();
+        String question = "FreshnessGate.requireFresh 在哪个类里抛出 StaleTaskException？";
+
+        retrieval.collect("kb", 1L, question,
+                List.of(ChatMessage.user("索引版本怎么校验？")), CONFIG,
+                query -> {
+                    queries.add(query);
+                    return List.of(hit("c1", 0.9));
+                }, ignored -> { }, () -> { });
+
+        assertEquals(List.of(question), queries);
+    }
+
+    @Test
+    void anUnusablePlannerDecisionIsSurfacedSeparatelyFromADeliberateAnswer() throws Exception {
+        IterativeRetrieval retrieval = new IterativeRetrieval(
+                new PlanningChat(List.of(RetrievalDecision.unavailable())));
+
+        IterativeRetrieval.Result unusable = retrieval.collect("kb", 1L, "q", List.of(), CONFIG,
+                query -> List.of(hit("c1", 0.9)), ignored -> { }, () -> { });
+        IterativeRetrieval.Result satisfied = new IterativeRetrieval(
+                new PlanningChat(List.of(RetrievalDecision.answer())))
+                .collect("kb", 1L, "q", List.of(), CONFIG,
+                        query -> List.of(hit("c1", 0.9)), ignored -> { }, () -> { });
+
+        assertTrue(unusable.plannerUnavailable());
+        assertFalse(satisfied.plannerUnavailable());
     }
 
     @Test
