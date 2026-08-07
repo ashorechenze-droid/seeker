@@ -45,12 +45,15 @@ import com.simplerag.model.RagCitation;
 import com.simplerag.model.SearchResult;
 import com.simplerag.model.SemanticHighlight;
 import com.simplerag.rag.ApiConfig;
+import com.simplerag.rag.ModelApiConfig;
 import com.simplerag.search.IndexSnapshot;
 import com.simplerag.search.IndexBuildRequest;
 import com.simplerag.search.IndexHandle;
 import com.simplerag.search.IndexIdentity;
 import com.simplerag.search.IndexManifest;
 import com.simplerag.search.SemanticSearchEngine;
+import com.simplerag.search.SecondStageReranker;
+import com.simplerag.search.FeatureReranker;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -68,6 +71,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
     private static final String ACTIVE_KB = "active_knowledge_base";
 
     private final TextEmbedder embeddingProvider;
+    private final SecondStageReranker reranker;
     private final KnowledgeBaseRepository knowledgeBases;
     private final KnowledgeSourceRepository sources;
     private final IndexPublicationRepository publications;
@@ -101,7 +105,17 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                             SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
                             IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor,
                             ActiveKnowledgeRuntime runtime, DiagnosticSink diagnostics) {
+        this(embeddingProvider, repository, settings, secretCodec, apiClient, indexRepository,
+                freshnessMonitor, runtime, diagnostics, new FeatureReranker());
+    }
+
+    public KnowledgeService(TextEmbedder embeddingProvider, KnowledgeBaseRepository repository,
+                            SettingsRepository settings, SecretStore secretCodec, ChatModel apiClient,
+                            IndexRepository indexRepository, SourceFreshnessMonitor freshnessMonitor,
+                            ActiveKnowledgeRuntime runtime, DiagnosticSink diagnostics,
+                            SecondStageReranker reranker) {
         this.embeddingProvider = embeddingProvider;
+        this.reranker = reranker == null ? new FeatureReranker() : reranker;
         this.knowledgeBases = repository;
         this.sources = repository;
         this.publications = repository;
@@ -210,7 +224,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
                 capturedSourceHash, embeddingProvider.signature());
         startFreshnessMonitoring(buildingTarget, capturedSources, request.sourceSetHash());
         refreshActiveKnowledgeBase();
-        SemanticSearchEngine builder = new SemanticSearchEngine(embeddingProvider, diagnostics);
+        SemanticSearchEngine builder = new SemanticSearchEngine(embeddingProvider, reranker, diagnostics);
         try {
             SemanticSearchEngine.IndexReport report = builder.index(request.sources(), previousSnapshot, progress);
             IndexSnapshot raw = builder.snapshot();
@@ -361,6 +375,27 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
         apiSettings.saveApiConfig(config);
     }
 
+    @Override public ModelApiConfig embeddingApiConfig() { return apiSettings.embeddingApiConfig(); }
+
+    @Override public synchronized void saveEmbeddingApiConfig(ModelApiConfig config) {
+        String previousSignature = embeddingProvider.signature().value();
+        apiSettings.saveEmbeddingApiConfig(config);
+        if (!previousSignature.equals(embeddingProvider.signature().value())
+                && runtime.currentOrNull() != null && requireHandle().engine().chunkCount() > 0) {
+            ActiveKnowledgeContext current = runtime.current();
+            publications.markIndexIncompatible(current.knowledgeBaseId(), "向量模型配置已变化，请重建索引");
+            KnowledgeBase refreshed = knowledgeBases.findKnowledgeBase(current.knowledgeBaseId()).orElseThrow();
+            current.indexHandle().engine().markStale();
+            runtime.invalidate(context(refreshed, current.indexHandle().engine()));
+        }
+    }
+
+    @Override public ModelApiConfig rerankApiConfig() { return apiSettings.rerankApiConfig(); }
+
+    @Override public void saveRerankApiConfig(ModelApiConfig config) {
+        apiSettings.saveRerankApiConfig(config);
+    }
+
     @Override public boolean localOnly(String knowledgeBaseId) { return apiSettings.localOnly(knowledgeBaseId); }
     @Override public void saveLocalOnly(String knowledgeBaseId, boolean localOnly) {
         apiSettings.saveLocalOnly(knowledgeBaseId, localOnly);
@@ -439,7 +474,7 @@ public final class KnowledgeService implements ManageKnowledgeBases, ManageKnowl
             selected = knowledgeBases.findKnowledgeBase(selected.id()).orElseThrow();
         }
         settings.putSetting(ACTIVE_KB, selected.id());
-        SemanticSearchEngine engine = new SemanticSearchEngine(embeddingProvider, diagnostics);
+        SemanticSearchEngine engine = new SemanticSearchEngine(embeddingProvider, reranker, diagnostics);
         try {
             indexRepository.cleanTemporaryFiles(selected.id());
             indexRepository.cleanUnreferenced(selected.id(), selected.publishedIndexRevision());

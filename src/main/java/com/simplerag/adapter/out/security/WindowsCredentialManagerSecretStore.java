@@ -29,8 +29,14 @@ public final class WindowsCredentialManagerSecretStore implements SecretStore {
 
     @Override
     public String encrypt(String plainText) {
+        return encrypt("chat", plainText);
+    }
+
+    @Override
+    public String encrypt(String namespace, String plainText) {
+        String target = target(namespace);
         if (plainText == null || plainText.isBlank()) {
-            deleteCredential();
+            deleteCredential(target);
             return "";
         }
         if (!isWindows()) return fallback.encrypt(plainText);
@@ -38,7 +44,7 @@ public final class WindowsCredentialManagerSecretStore implements SecretStore {
             byte[] bytes = plainText.getBytes(StandardCharsets.UTF_16LE);
             Credential credential = new Credential();
             credential.Type = CRED_TYPE_GENERIC;
-            credential.TargetName = new WString(TARGET);
+            credential.TargetName = new WString(target);
             credential.UserName = new WString(System.getProperty("user.name", "SimpleRAG"));
             credential.Persist = CRED_PERSIST_LOCAL_MACHINE;
             credential.CredentialBlobSize = bytes.length;
@@ -49,7 +55,7 @@ public final class WindowsCredentialManagerSecretStore implements SecretStore {
                 throw new IllegalStateException("CredWriteW failed with Windows error " + Native.getLastError());
             }
             diagnostics.record("credential stored", "security", "API credential stored in Windows Credential Manager");
-            return MARKER;
+            return marker(target);
         } catch (RuntimeException failure) {
             diagnostics.record("credential fallback", "security", failure.getClass().getSimpleName(),
                     Map.of("backend", "application-encrypted"));
@@ -59,10 +65,19 @@ public final class WindowsCredentialManagerSecretStore implements SecretStore {
 
     @Override
     public String decrypt(String encoded) {
+        return decrypt("chat", encoded);
+    }
+
+    @Override
+    public String decrypt(String namespace, String encoded) {
         if (encoded == null || encoded.isBlank()) return "";
-        if (!MARKER.equals(encoded) || !isWindows()) return fallback.decrypt(encoded);
+        String target = target(namespace);
+        // The original chat credential used this fixed marker and target; keep it readable.
+        if (MARKER.equals(encoded)) target = TARGET;
+        else if (!marker(target).equals(encoded)) return fallback.decrypt(encoded);
+        if (!isWindows()) return fallback.decrypt(encoded);
         PointerByReference reference = new PointerByReference();
-        if (!CredentialsApi.INSTANCE.CredReadW(new WString(TARGET), CRED_TYPE_GENERIC, 0, reference)) return "";
+        if (!CredentialsApi.INSTANCE.CredReadW(new WString(target), CRED_TYPE_GENERIC, 0, reference)) return "";
         Pointer pointer = reference.getValue();
         Credential credential = new Credential(pointer);
         try {
@@ -74,8 +89,17 @@ public final class WindowsCredentialManagerSecretStore implements SecretStore {
         }
     }
 
-    private void deleteCredential() {
-        if (isWindows()) CredentialsApi.INSTANCE.CredDeleteW(new WString(TARGET), CRED_TYPE_GENERIC, 0);
+    private void deleteCredential(String target) {
+        if (isWindows()) CredentialsApi.INSTANCE.CredDeleteW(new WString(target), CRED_TYPE_GENERIC, 0);
+    }
+
+    private static String target(String namespace) {
+        String value = namespace == null ? "" : namespace.strip().toLowerCase(java.util.Locale.ROOT);
+        return value.isEmpty() || "chat".equals(value) ? TARGET : TARGET + "/" + value;
+    }
+
+    private static String marker(String target) {
+        return "wincred:v1:" + target;
     }
 
     private static boolean isWindows() {

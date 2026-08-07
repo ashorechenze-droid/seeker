@@ -51,6 +51,7 @@ public final class DesktopWorkspaceController {
     private final SearchPanel searchPanel;
     private final KnowledgePanel knowledgePanel;
     private final DiagnosticPanel diagnosticPanel;
+    private final SettingsPanel settingsPanel;
     private final Timer searchTimer;
     private final Timer statusResetTimer;
     private final Timer freshnessTimer;
@@ -68,7 +69,10 @@ public final class DesktopWorkspaceController {
         this.tasks = tasks;
         this.files = files;
         this.activeKnowledgeChanged = activeKnowledgeChanged;
-        this.askPanel = new AskPanel(this::askQuestion, this::saveApiConfig, this::fetchModels, this::openCitation, this::clearConversation);
+        this.askPanel = new AskPanel(this::askQuestion, this::saveLocalPolicy,
+                button -> fetchModels(SettingsPanel.ModelKind.CHAT, button),
+                this::openCitation, this::clearConversation);
+        this.settingsPanel = new SettingsPanel(this::saveApiSettings, this::fetchModels);
         this.searchPanel = new SearchPanel(this::scheduleSearch, this::setPreview,
                 this::openSelectedFile, this::openSelectedDirectory, this::copySelectedChunk);
         this.knowledgePanel = new KnowledgePanel(this::createKnowledgeBase, this::editKnowledgeBase,
@@ -84,6 +88,7 @@ public final class DesktopWorkspaceController {
         freshnessTimer.start();
         installQuestionShortcut();
         askPanel.config(ask.config());
+        settingsPanel.configs(ask.config(), ask.embeddingConfig(), ask.rerankConfig());
         refreshAll();
         setPreview(null);
     }
@@ -92,6 +97,7 @@ public final class DesktopWorkspaceController {
     public SearchPanel searchPanel() { return searchPanel; }
     public AskPanel askPanel() { return askPanel; }
     public DiagnosticPanel diagnosticPanel() { return diagnosticPanel; }
+    public SettingsPanel settingsPanel() { return settingsPanel; }
     public StatusBar statusBar() { return statusBar; }
     public void focusSearch() { searchPanel.focusQuery(); }
 
@@ -228,25 +234,63 @@ public final class DesktopWorkspaceController {
                 }, failure -> searchPanel.semanticReset(document), () -> searchPanel.semanticReset(document));
     }
 
-    private void saveApiConfig() {
+    private void saveLocalPolicy() {
         try {
-            ask.saveConfig(askPanel.config());
             KnowledgeBase current = knowledge.current();
             if (current != null) ask.saveLocalOnly(current.id(), askPanel.localOnly());
-            askPanel.apiStatus("API 配置与知识库发送策略已安全保存", Theme.ACCENT);
+            askPanel.apiStatus("本知识库的远程发送策略已保存", Theme.ACCENT);
+        } catch (RuntimeException failure) { showError("无法保存发送策略", failure); }
+    }
+
+    private void saveApiSettings() {
+        try {
+            ask.saveConfig(settingsPanel.chatConfig());
+            ask.saveEmbeddingConfig(settingsPanel.embeddingConfig());
+            ask.saveRerankConfig(settingsPanel.rerankConfig());
+            askPanel.config(ask.config());
+            settingsPanel.configs(ask.config(), ask.embeddingConfig(), ask.rerankConfig());
+            settingsPanel.status("全部 API 配置已安全保存；若切换向量模型，请重建索引", Theme.ACCENT);
         }
         catch (RuntimeException failure) { showError("无法保存 API 配置", failure); }
     }
-    private void fetchModels(JButton button) {
-        ApiConfig config = askPanel.config(); button.setEnabled(false); askPanel.apiStatus("正在连接 API 并获取模型...", Theme.MUTED);
-        tasks.<List<String>, Void>submit(null, null, ignored -> ask.fetchModels(config), null, models -> {
-            button.setEnabled(true); Object previous = askPanel.modelEditorValue(); askPanel.models(models, previous);
-            askPanel.apiStatus(models.isEmpty() ? "API 未返回可用模型" : "已获取 " + models.size() + " 个模型", Theme.ACCENT);
-        }, failure -> { button.setEnabled(true); askPanel.apiStatus(failure.getMessage(), Theme.RED); }, () -> button.setEnabled(true));
+    private void fetchModels(SettingsPanel.ModelKind kind, JButton button) {
+        ApiConfig config = switch (kind) {
+            case CHAT -> settingsPanel.chatConfig();
+            case EMBEDDING -> settingsPanel.embeddingConfig().asApiConfig();
+            case RERANK -> settingsPanel.rerankConfig().asApiConfig();
+        };
+        ApiConfig requestConfig = modelListConfig(config, kind);
+        button.setEnabled(false); settingsPanel.status("正在连接 " + kindLabel(kind) + " API 并获取模型...", Theme.MUTED);
+        tasks.<List<String>, Void>submit(null, null, ignored -> ask.fetchModels(requestConfig), null, models -> {
+            button.setEnabled(true);
+            Object previous = settingsPanel.modelEditorValue(kind);
+            settingsPanel.models(kind, models, previous);
+            settingsPanel.status(models.isEmpty() ? kindLabel(kind) + " API 未返回可用模型"
+                    : kindLabel(kind) + " API 已获取 " + models.size() + " 个模型", Theme.ACCENT);
+        }, failure -> { button.setEnabled(true); settingsPanel.status(failure.getMessage(), Theme.RED); }, () -> button.setEnabled(true));
+    }
+
+    private static String kindLabel(SettingsPanel.ModelKind kind) {
+        return switch (kind) {
+            case CHAT -> "对话模型";
+            case EMBEDDING -> "向量模型";
+            case RERANK -> "重排模型";
+        };
+    }
+
+    static ApiConfig modelListConfig(ApiConfig config, SettingsPanel.ModelKind kind) {
+        String base = config.normalizedBaseUrl();
+        String suffix = switch (kind) {
+            case CHAT -> "/chat/completions";
+            case EMBEDDING -> "/embeddings";
+            case RERANK -> "/rerank";
+        };
+        if (base.endsWith(suffix)) base = base.substring(0, base.length() - suffix.length());
+        return new ApiConfig(base, config.apiKey(), config.model());
     }
     private void askQuestion() {
         if (askTask != null && !askTask.isDone()) { askTask.cancel(); return; }
-        String question = askPanel.question(); if (question.isEmpty()) return; ApiConfig config = askPanel.config();
+        String question = askPanel.question(); if (question.isEmpty()) return; ApiConfig config = ask.config();
         try { config.validateForChat(); ask.saveConfig(config); }
         catch (RuntimeException failure) { showError("API 配置不完整", failure); return; }
         askPanel.asking(true);

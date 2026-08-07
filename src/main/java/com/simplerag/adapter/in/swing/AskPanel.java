@@ -93,7 +93,7 @@ public final class AskPanel extends JPanel {
                 relayoutBubbles();
             }
         });
-        add(buildApiPanel(onSave, onFetch), BorderLayout.NORTH);
+        add(buildPrivacyPanel(onSave), BorderLayout.NORTH);
         add(buildChatPanel(onAsk, onClearChat), BorderLayout.CENTER);
         citationList.addMouseListener(new MouseAdapter() {
             @Override public void mouseClicked(MouseEvent event) {
@@ -557,6 +557,24 @@ public final class AskPanel extends JPanel {
         pane.setBorder(null);
         pane.getViewport().setBackground(Theme.PANEL);
         return pane;
+    }
+
+    /** Compact per-knowledge-base privacy control; provider credentials live on Settings page. */
+    private JPanel buildPrivacyPanel(Runnable onSave) {
+        JPanel panel = new JPanel(new BorderLayout(12, 0));
+        Theme.opaque(panel, Theme.PANEL_ALT);
+        panel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, Theme.BORDER), Theme.padding(9, 16, 9, 16)));
+        JLabel hint = new JLabel("模型配置请前往“设置”页 · 远程发送前仍会逐知识库确认");
+        hint.setForeground(Theme.MUTED);
+        hint.setFont(Theme.UI_FONT.deriveFont(10f));
+        panel.add(hint, BorderLayout.CENTER);
+        localOnly.setOpaque(false);
+        localOnly.setForeground(Theme.MUTED);
+        localOnly.setFont(Theme.UI_FONT.deriveFont(10f));
+        panel.add(localOnly, BorderLayout.EAST);
+        localOnly.addActionListener(event -> onSave.run());
+        return panel;
     }
 
     private String citationText() {

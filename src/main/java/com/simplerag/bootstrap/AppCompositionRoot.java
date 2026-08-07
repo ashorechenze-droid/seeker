@@ -18,6 +18,9 @@ import com.simplerag.application.runtime.IndexLifecycle;
 import com.simplerag.application.freshness.FreshnessGate;
 import com.simplerag.adapter.out.onnx.Langchain4jOnnxEmbeddingProvider;
 import com.simplerag.adapter.out.openai.OpenAiCompatibleClient;
+import com.simplerag.adapter.out.openai.OpenAiCompatibleEmbeddingProvider;
+import com.simplerag.adapter.out.openai.OpenAiCompatibleReranker;
+import com.simplerag.search.FeatureReranker;
 import com.simplerag.adapter.out.sqlite.AppRepository;
 import com.simplerag.adapter.out.sqlite.DatabaseManager;
 import com.simplerag.adapter.out.security.SecretCodec;
@@ -40,7 +43,6 @@ public final class AppCompositionRoot {
         ThemeBootstrap.install();
         DatabaseManager database = new DatabaseManager();
         AppRepository sqlite = new AppRepository(database);
-        Langchain4jOnnxEmbeddingProvider embeddings = new Langchain4jOnnxEmbeddingProvider();
         InMemoryDiagnosticLog diagnostics = new InMemoryDiagnosticLog();
         WindowsCredentialManagerSecretStore secrets = new WindowsCredentialManagerSecretStore(
                 new SecretCodec(), diagnostics);
@@ -48,12 +50,18 @@ public final class AppCompositionRoot {
         // (which spends the budget), so the budget tracks what the endpoint actually charges.
         TokenEstimator tokens = new TokenEstimator(sqlite);
         OpenAiCompatibleClient chat = new OpenAiCompatibleClient(diagnostics, tokens);
+        ApiSettingsUseCase apiSettings = new ApiSettingsUseCase(sqlite, secrets, chat);
+        Langchain4jOnnxEmbeddingProvider localEmbeddings = new Langchain4jOnnxEmbeddingProvider();
+        OpenAiCompatibleEmbeddingProvider embeddings = new OpenAiCompatibleEmbeddingProvider(
+                localEmbeddings, apiSettings::embeddingApiConfig);
+        OpenAiCompatibleReranker reranker = new OpenAiCompatibleReranker(
+                new FeatureReranker(), apiSettings::rerankApiConfig, diagnostics);
         FileSystemSourceFreshnessMonitor freshness = new FileSystemSourceFreshnessMonitor();
         ActiveKnowledgeRuntime runtime = new ActiveKnowledgeRuntime(new IndexLifecycle(), diagnostics);
         KnowledgeService service = new KnowledgeService(
                 embeddings, sqlite, sqlite, secrets, chat, new FileSystemIndexRepository(
                 Path.of(System.getProperty("user.home"), ".simplerag", "indexes")),
-                freshness, runtime, diagnostics);
+                freshness, runtime, diagnostics, reranker);
         Runtime.getRuntime().addShutdownHook(new Thread(service::close, "simplerag-shutdown"));
         service.restore();
         KnowledgeBaseUseCases knowledgeBases = new KnowledgeBaseUseCases(service);
@@ -61,12 +69,11 @@ public final class AppCompositionRoot {
         IndexBuildUseCase indexBuild = new IndexBuildUseCase(service);
         SearchUseCase search = new SearchUseCase(runtime);
         AskUseCase ask = new AskUseCase(runtime, sqlite, new FreshnessGate(freshness), chat, sqlite, diagnostics);
-        ApiSettingsUseCase apiSettings = new ApiSettingsUseCase(sqlite, secrets, chat);
         DesktopQueryService desktopQueries = new DesktopQueryService(service);
         SwingUtilities.invokeLater(() -> {
             MainFrame frame = new MainFrame(
                     new KnowledgeController(knowledgeBases, sources, indexBuild, desktopQueries),
-                    new SearchController(search), new AskController(ask, apiSettings,
+                    new SearchController(search), new AskController(ask, service,
                             new ConversationStore(ConversationContext.defaults(tokens))),
                     new BackgroundTaskCoordinator(), new SystemDesktopFileGateway(),
                     new DiagnosticReportService(runtime, diagnostics));

@@ -9,6 +9,7 @@ import com.simplerag.application.dto.AskResultView;
 import com.simplerag.application.dto.CitationView;
 import com.simplerag.application.port.in.RemoteSendAuthorizer;
 import com.simplerag.rag.ApiConfig;
+import com.simplerag.rag.ModelApiConfig;
 
 import java.io.IOException;
 import java.util.List;
@@ -34,6 +35,10 @@ public final class AskController {
     public List<String> fetchModels(ApiConfig config) throws IOException, InterruptedException {
         return settings.fetchModels(config);
     }
+    public ModelApiConfig embeddingConfig() { return settings.embeddingApiConfig(); }
+    public void saveEmbeddingConfig(ModelApiConfig config) { settings.saveEmbeddingApiConfig(config); }
+    public ModelApiConfig rerankConfig() { return settings.rerankApiConfig(); }
+    public void saveRerankConfig(ModelApiConfig config) { settings.saveRerankApiConfig(config); }
     public boolean localOnly(String knowledgeBaseId) { return settings.localOnly(knowledgeBaseId); }
     public void saveLocalOnly(String knowledgeBaseId, boolean value) { settings.saveLocalOnly(knowledgeBaseId, value); }
     public void trustHost(String host) { settings.trustHost(host); }

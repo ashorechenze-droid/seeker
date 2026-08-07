@@ -2,7 +2,7 @@
 
 SimpleRAG 是一个 Java 17 + Swing 桌面端本地知识库客户端，支持多知识库、中英文文档与代码检索、语义片段高亮，以及基于 OpenAI 兼容 API 的带引用、多轮 RAG 问答（聊天气泡 UI）。
 
-文件扫描、分块、TF-IDF 特征、ONNX embedding 和索引持久化均在本机完成。语义模型通过 LangChain4j 的 in-process ONNX Runtime 在 JVM 内运行，不依赖 Python，也不会把文档上传到 embedding 服务。
+文件扫描、分块、TF-IDF 特征和索引持久化默认均在本机完成。语义模型默认通过 LangChain4j 的 in-process ONNX Runtime 在 JVM 内运行；也可以在“设置”页切换到 OpenAI 兼容的向量 API。重排默认使用本地确定性规则，也可选用兼容 `/rerank` 的远程重排 API。
 
 ## 环境要求
 
@@ -122,6 +122,8 @@ Ollama: http://localhost:11434/v1
 GET  <baseUrl>/models
 POST <baseUrl>/chat/completions
 ```
+
+“设置”页将三类 API 分开保存：对话模型、向量模型和重排模型。向量 API 使用 `POST <baseUrl>/embeddings`，请求体包含 `model`、批量 `input`，可选 `dimensions`；重排 API 使用 `POST <baseUrl>/rerank`，请求体包含 `model`、`query`、`documents` 和 `top_n`。向量 API 返回的维度会校验并写入索引 manifest；切换向量服务或模型后必须重建索引，防止新旧向量混用。重排请求失败时会自动回退本地重排，不影响基础检索结果。
 
 问答先按用户问题召回最多 6 个片段；模型会评估当前证据，资料不足时自主生成更聚焦的检索词，并最多追加 3 轮本地检索。所有轮次合并去重，最多保留 12 个片段，然后流式生成带引用回答。每当新增片段扩大远程发送范围时，客户端都会更新“本轮引用”并再次显示准确范围供确认。
 

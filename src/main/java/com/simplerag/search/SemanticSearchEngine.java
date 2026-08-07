@@ -60,6 +60,13 @@ public final class SemanticSearchEngine {
                 new LexicalFeatureExtractor(), new SemanticScorer(), RankingPolicy.defaultPolicy(), diagnostics);
     }
 
+    public SemanticSearchEngine(TextEmbedder embeddingProvider, SecondStageReranker reranker,
+                                DiagnosticSink diagnostics) {
+        this(embeddingProvider, new DocumentScanner(), new DocumentReaderRegistry(), new ChunkerRegistry(),
+                new LexicalFeatureExtractor(), new SemanticScorer(), RankingPolicy.defaultPolicy(),
+                reranker, diagnostics);
+    }
+
     public SemanticSearchEngine(TextEmbedder embeddingProvider, SemanticScorer semanticScorer,
                                 RankingPolicy rankingPolicy) {
         this(embeddingProvider, new DocumentScanner(), new DocumentReaderRegistry(), new ChunkerRegistry(),
@@ -78,6 +85,15 @@ public final class SemanticSearchEngine {
                                 DocumentReaderRegistry readerRegistry, ChunkerRegistry chunkerRegistry,
                                 LexicalFeatureExtractor lexicalFeatures, SemanticScorer semanticScorer,
                                 RankingPolicy rankingPolicy, DiagnosticSink diagnostics) {
+        this(embeddingProvider, documentScanner, readerRegistry, chunkerRegistry, lexicalFeatures,
+                semanticScorer, rankingPolicy, new FeatureReranker(), diagnostics);
+    }
+
+    public SemanticSearchEngine(TextEmbedder embeddingProvider, DocumentScanner documentScanner,
+                                DocumentReaderRegistry readerRegistry, ChunkerRegistry chunkerRegistry,
+                                LexicalFeatureExtractor lexicalFeatures, SemanticScorer semanticScorer,
+                                RankingPolicy rankingPolicy, SecondStageReranker reranker,
+                                DiagnosticSink diagnostics) {
         this.embeddingProvider = embeddingProvider;
         this.documentScanner = documentScanner;
         this.readerRegistry = readerRegistry;
@@ -85,7 +101,8 @@ public final class SemanticSearchEngine {
         this.lexicalFeatures = lexicalFeatures;
         this.queryAnalyzer = new QueryAnalyzer(lexicalFeatures);
         this.lexicalScorer = new LexicalScorer(lexicalFeatures);
-        this.retrievalPipeline = new RetrievalPipeline(semanticScorer, lexicalScorer, new FeatureReranker());
+        this.retrievalPipeline = new RetrievalPipeline(semanticScorer, lexicalScorer,
+                reranker == null ? new FeatureReranker() : reranker);
         this.contextSelector = new ContextSelector();
         this.highlightService = new SemanticHighlightService(embeddingProvider, semanticScorer);
         this.semanticScorer = semanticScorer;
@@ -139,6 +156,7 @@ public final class SemanticSearchEngine {
     }
 
     private float[] prepareSemanticQuery(QueryAnalyzer.AnalyzedQuery analyzed, State current) {
+        refreshSemanticCompatibility();
         if (!semanticCompatible) return null;
         try {
             float[] query = semanticQuery(analyzed.semanticText());
@@ -199,6 +217,7 @@ public final class SemanticSearchEngine {
     }
 
     public boolean semanticEnabled() {
+        refreshSemanticCompatibility();
         return semanticCompatible && embeddingsActive && state.hasEmbeddings;
     }
 
@@ -219,8 +238,16 @@ public final class SemanticSearchEngine {
     public String semanticStatus() {
         if (!embeddingProvider.isConfigured()) return "未安装语义模型";
         if (!state.hasEmbeddings) return "模型已安装，需重建索引";
+        refreshSemanticCompatibility();
         if (!semanticCompatible) return "索引向量与当前模型不兼容，需重建";
         return embeddingProvider.status();
+    }
+
+    private void refreshSemanticCompatibility() {
+        if (manifest == null) return;
+        boolean compatible = state.hasEmbeddings && isSemanticCompatible(snapshot());
+        semanticCompatible = compatible;
+        if (!compatible) embeddingsActive = false;
     }
 
     private boolean isSemanticCompatible(IndexSnapshot snapshot) {

@@ -6,6 +6,7 @@ import com.simplerag.application.port.out.ChatModel;
 import com.simplerag.application.port.out.SecretStore;
 import com.simplerag.application.port.out.SettingsRepository;
 import com.simplerag.rag.ApiConfig;
+import com.simplerag.rag.ModelApiConfig;
 
 import java.io.IOException;
 import java.util.List;
@@ -17,6 +18,15 @@ public final class ApiSettingsUseCase implements ManageApiSettings {
     private static final String API_URL = "api.base_url";
     private static final String API_KEY = "api.encrypted_key";
     private static final String API_MODEL = "api.model";
+    private static final String EMBEDDING_ENABLED = "embedding.api.enabled";
+    private static final String EMBEDDING_URL = "embedding.api.base_url";
+    private static final String EMBEDDING_KEY = "embedding.api.encrypted_key";
+    private static final String EMBEDDING_MODEL = "embedding.api.model";
+    private static final String EMBEDDING_DIMENSIONS = "embedding.api.dimensions";
+    private static final String RERANK_ENABLED = "rerank.api.enabled";
+    private static final String RERANK_URL = "rerank.api.base_url";
+    private static final String RERANK_KEY = "rerank.api.encrypted_key";
+    private static final String RERANK_MODEL = "rerank.api.model";
     private static final String TRUSTED_HOSTS = "api.trusted_hosts";
     private static final String LOCAL_ONLY_PREFIX = "rag.local_only.";
     private final SettingsRepository settings;
@@ -31,7 +41,7 @@ public final class ApiSettingsUseCase implements ManageApiSettings {
 
     @Override public ApiConfig apiConfig() {
         String url = settings.getSetting(API_URL).orElse("http://localhost:11434/v1");
-        String key = secrets.decrypt(settings.getSetting(API_KEY).orElse(""));
+        String key = secrets.decrypt("chat", settings.getSetting(API_KEY).orElse(""));
         String model = settings.getSetting(API_MODEL).orElse("");
         return new ApiConfig(url, key, model);
     }
@@ -39,11 +49,58 @@ public final class ApiSettingsUseCase implements ManageApiSettings {
     @Override public void saveApiConfig(ApiConfig config) {
         config.validateForModels();
         settings.putSetting(API_URL, config.normalizedBaseUrl());
-        settings.putSetting(API_KEY, secrets.encrypt(config.apiKey()));
+        settings.putSetting(API_KEY, secrets.encrypt("chat", config.apiKey()));
         settings.putSetting(API_MODEL, config.model());
     }
     @Override public List<String> fetchModels(ApiConfig config) throws IOException, InterruptedException {
         return chat.listModels(config);
+    }
+
+    @Override public ModelApiConfig embeddingApiConfig() {
+        return modelConfig(EMBEDDING_ENABLED, EMBEDDING_URL, EMBEDDING_KEY, EMBEDDING_MODEL,
+                EMBEDDING_DIMENSIONS, "embedding");
+    }
+
+    @Override public void saveEmbeddingApiConfig(ModelApiConfig config) {
+        saveModelConfig(config, EMBEDDING_ENABLED, EMBEDDING_URL, EMBEDDING_KEY,
+                EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, "embedding");
+    }
+
+    @Override public ModelApiConfig rerankApiConfig() {
+        return modelConfig(RERANK_ENABLED, RERANK_URL, RERANK_KEY, RERANK_MODEL,
+                null, "rerank");
+    }
+
+    @Override public void saveRerankApiConfig(ModelApiConfig config) {
+        saveModelConfig(config, RERANK_ENABLED, RERANK_URL, RERANK_KEY,
+                RERANK_MODEL, null, "rerank");
+    }
+
+    private ModelApiConfig modelConfig(String enabledKey, String urlKey, String keyKey,
+                                       String modelKey, String dimensionsKey, String namespace) {
+        boolean enabled = Boolean.parseBoolean(settings.getSetting(enabledKey).orElse("false"));
+        String url = settings.getSetting(urlKey).orElse("");
+        String key = secrets.decrypt(namespace, settings.getSetting(keyKey).orElse(""));
+        String model = settings.getSetting(modelKey).orElse("");
+        int dimensions = dimensionsKey == null ? 0 : parseNonNegativeInt(
+                settings.getSetting(dimensionsKey).orElse("0"));
+        return new ModelApiConfig(enabled, url, key, model, dimensions);
+    }
+
+    private void saveModelConfig(ModelApiConfig config, String enabledKey, String urlKey,
+                                 String keyKey, String modelKey, String dimensionsKey,
+                                 String namespace) {
+        config.validate();
+        settings.putSetting(enabledKey, Boolean.toString(config.enabled()));
+        settings.putSetting(urlKey, config.normalizedBaseUrl());
+        settings.putSetting(keyKey, secrets.encrypt(namespace, config.apiKey()));
+        settings.putSetting(modelKey, config.model());
+        if (dimensionsKey != null) settings.putSetting(dimensionsKey, Integer.toString(config.dimensions()));
+    }
+
+    private static int parseNonNegativeInt(String value) {
+        try { return Math.max(0, Integer.parseInt(value)); }
+        catch (NumberFormatException invalid) { return 0; }
     }
 
     @Override public boolean localOnly(String knowledgeBaseId) {
