@@ -3,6 +3,8 @@ package com.simplerag.adapter.in.swing;
 import com.simplerag.application.dto.AskResultView;
 import com.simplerag.application.dto.CitationView;
 import com.simplerag.application.dto.DocumentReference;
+import com.simplerag.application.dto.FileContentView;
+import com.simplerag.application.dto.FileNodeView;
 import com.simplerag.application.dto.IndexBuildProgress;
 import com.simplerag.application.dto.IndexBuildResult;
 import com.simplerag.application.dto.SearchResultView;
@@ -43,13 +45,17 @@ public final class DesktopWorkspaceController {
     private final KnowledgeController knowledge;
     private final SearchController search;
     private final AskController ask;
+    private final FileBrowserController browser;
     private final BackgroundTaskCoordinator tasks;
     private final DesktopFileGateway files;
     private final Consumer<KnowledgeBase> activeKnowledgeChanged;
+    private final Runnable showFilePage;
     private final StatusBar statusBar = new StatusBar();
     private final AskPanel askPanel;
     private final SearchPanel searchPanel;
     private final KnowledgePanel knowledgePanel;
+    private final FileExplorerPanel explorerPanel;
+    private final FileViewerPanel viewerPanel;
     private final DiagnosticPanel diagnosticPanel;
     private final SettingsPanel settingsPanel;
     private final Timer searchTimer;
@@ -58,26 +64,31 @@ public final class DesktopWorkspaceController {
     private BackgroundTaskCoordinator.TaskHandle searchTask;
     private BackgroundTaskCoordinator.TaskHandle highlightTask;
     private BackgroundTaskCoordinator.TaskHandle askTask;
+    private BackgroundTaskCoordinator.TaskHandle previewTask;
 
     public DesktopWorkspaceController(KnowledgeController knowledge, SearchController search, AskController ask,
-                                      BackgroundTaskCoordinator tasks, DesktopFileGateway files,
-                                      Consumer<KnowledgeBase> activeKnowledgeChanged,
-                                      DiagnosticReportService diagnostics) {
+                                      FileBrowserController browser, BackgroundTaskCoordinator tasks,
+                                      DesktopFileGateway files, Consumer<KnowledgeBase> activeKnowledgeChanged,
+                                      Runnable showFilePage, DiagnosticReportService diagnostics) {
         this.knowledge = knowledge;
         this.search = search;
         this.ask = ask;
+        this.browser = browser;
         this.tasks = tasks;
         this.files = files;
         this.activeKnowledgeChanged = activeKnowledgeChanged;
+        this.showFilePage = showFilePage;
         this.askPanel = new AskPanel(this::askQuestion, this::saveLocalPolicy,
                 button -> fetchModels(SettingsPanel.ModelKind.CHAT, button),
                 this::openCitation, this::clearConversation);
         this.settingsPanel = new SettingsPanel(this::saveApiSettings, this::fetchModels);
         this.searchPanel = new SearchPanel(this::scheduleSearch, this::setPreview,
                 this::openSelectedFile, this::openSelectedDirectory, this::copySelectedChunk);
+        this.explorerPanel = new FileExplorerPanel(new ExplorerLoader(), new ExplorerActions(),
+                this::previewFileNode);
+        this.viewerPanel = new FileViewerPanel(this::openFile, this::openFile, this::copyPath);
         this.knowledgePanel = new KnowledgePanel(this::createKnowledgeBase, this::editKnowledgeBase,
-                this::deleteKnowledgeBase, this::switchKnowledgeBase, this::chooseSource,
-                this::removeSelectedSource, this::rebuildIndex);
+                this::deleteKnowledgeBase, this::switchKnowledgeBase, this::rebuildIndex, explorerPanel);
         this.diagnosticPanel = new DiagnosticPanel(diagnostics);
         this.searchTimer = new Timer(180, event -> performSearch());
         searchTimer.setRepeats(false);
@@ -96,6 +107,7 @@ public final class DesktopWorkspaceController {
     public KnowledgePanel knowledgePanel() { return knowledgePanel; }
     public SearchPanel searchPanel() { return searchPanel; }
     public AskPanel askPanel() { return askPanel; }
+    public FileViewerPanel fileViewerPanel() { return viewerPanel; }
     public DiagnosticPanel diagnosticPanel() { return diagnosticPanel; }
     public SettingsPanel settingsPanel() { return settingsPanel; }
     public StatusBar statusBar() { return statusBar; }
@@ -133,7 +145,7 @@ public final class DesktopWorkspaceController {
         }
     }
     private void refreshSourcesAndStats() {
-        knowledgePanel.sources(knowledge.sources());
+        explorerPanel.reload();
         KnowledgeStats stats = knowledge.stats();
         knowledgePanel.stats(stats);
         statusBar.semantic(knowledge.semanticStatus(), knowledge.semanticEnabled());
@@ -177,7 +189,7 @@ public final class DesktopWorkspaceController {
         try { knowledge.select(selected.id()); clearWorkspace(); refreshSourcesAndStats(); activeKnowledgeChanged.accept(selected); statusBar.status("已切换到 “" + selected.name() + "”"); }
         catch (RuntimeException failure) { showError("无法切换知识库", failure); }
     }
-    private void chooseSource(ActionEvent event) {
+    private void chooseSource() {
         JFileChooser chooser = new JFileChooser(); chooser.setDialogTitle("选择数据源目录");
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY); chooser.setMultiSelectionEnabled(true);
         if (chooser.showOpenDialog(knowledgePanel) == JFileChooser.APPROVE_OPTION) {
@@ -185,9 +197,12 @@ public final class DesktopWorkspaceController {
             refreshSourcesAndStats(); rebuildIndex();
         }
     }
-    private void removeSelectedSource() {
-        Path selected = knowledgePanel.selectedSource(); if (selected == null) return;
-        knowledge.removeSource(selected); refreshSourcesAndStats(); rebuildIndex();
+    private void removeSource(Path root) {
+        int answer = JOptionPane.showConfirmDialog(knowledgePanel,
+                "从当前知识库移除该数据源目录？\n" + root + "\n\n源文件不会被删除，但该目录的内容会退出索引。",
+                "移除数据源", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (answer != JOptionPane.OK_OPTION) return;
+        knowledge.removeSource(root); viewerPanel.empty(); refreshSourcesAndStats(); rebuildIndex();
     }
 
     private void rebuildIndex() {
@@ -382,6 +397,8 @@ public final class DesktopWorkspaceController {
         clearTasks();
         askPanel.asking(false);
         searchPanel.clear();
+        explorerPanel.clear();
+        viewerPanel.empty();
         reloadConversationUi();
         setPreview(null);
     }
@@ -402,6 +419,62 @@ public final class DesktopWorkspaceController {
         if (searchTask != null && !searchTask.isDone()) searchTask.cancel();
         if (highlightTask != null && !highlightTask.isDone()) highlightTask.cancel();
         if (askTask != null && !askTask.isDone()) askTask.cancel();
+        if (previewTask != null && !previewTask.isDone()) previewTask.cancel();
+    }
+
+    /**
+     * Single click previews, double click opens the file page - the same split editors use, so
+     * browsing the tree never blocks on reading a large document.
+     */
+    private void previewFileNode(FileNodeView node) {
+        if (previewTask != null) previewTask.cancel();
+        if (node == null) { viewerPanel.empty(); return; }
+        if (node.directory()) { viewerPanel.folder(node); return; }
+        viewerPanel.loading(node);
+        KnowledgeController.TaskIdentity identity = knowledge.identity();
+        previewTask = tasks.<FileContentView, Void>submit(identity, knowledge::identity,
+                ignored -> browser.read(identity, node.path()), null,
+                content -> viewerPanel.show(node, content),
+                failure -> viewerPanel.failed(node, failure.getMessage()), () -> { });
+    }
+
+    private void copyPath(Path path) {
+        Toolkit.getDefaultToolkit().getSystemClipboard().setContents(
+                new StringSelection(path.toString()), null);
+        flashStatus("路径已复制");
+    }
+
+    private final class ExplorerLoader implements FileExplorerPanel.Loader {
+        @Override
+        public void loadRoots(Consumer<List<FileNodeView>> onLoaded, Consumer<String> onFailed) {
+            KnowledgeController.TaskIdentity identity = knowledge.identity();
+            tasks.<List<FileNodeView>, Void>submit(identity, knowledge::identity,
+                    ignored -> browser.roots(identity), null, onLoaded,
+                    failure -> onFailed.accept(reason(failure)), () -> { });
+        }
+
+        @Override
+        public void loadChildren(Path directory, Consumer<List<FileNodeView>> onLoaded,
+                                 Consumer<String> onFailed) {
+            KnowledgeController.TaskIdentity identity = knowledge.identity();
+            tasks.<List<FileNodeView>, Void>submit(identity, knowledge::identity,
+                    ignored -> browser.children(identity, directory), null, onLoaded,
+                    failure -> onFailed.accept(reason(failure)), () -> { });
+        }
+
+        private String reason(Throwable failure) {
+            String message = failure.getMessage();
+            return message == null || message.isBlank() ? failure.getClass().getSimpleName() : message;
+        }
+    }
+
+    private final class ExplorerActions implements FileExplorerPanel.Actions {
+        @Override public void addFolder() { chooseSource(); }
+        @Override public void removeRoot(Path root) { removeSource(root); }
+        @Override public void openInApp(FileNodeView node) { showFilePage.run(); previewFileNode(node); }
+        @Override public void openWithSystem(Path path) { openFile(path); }
+        @Override public void revealInSystem(Path path) { openFile(path); }
+        @Override public void copyPath(Path path) { DesktopWorkspaceController.this.copyPath(path); }
     }
     private boolean isCurrentIdentity(KnowledgeController.TaskIdentity identity) { return identity.equals(knowledge.identity()); }
     private void openSelectedFile() { SearchResultView selected = searchPanel.selected(); if (selected != null) openFile(selected.document().path()); }

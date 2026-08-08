@@ -29,6 +29,7 @@ import java.nio.file.Path;
 public final class MainFrame extends JFrame {
     private static final String SEARCH_MODE = "search";
     private static final String ASK_MODE = "ask";
+    private static final String FILE_MODE = "file";
     private static final String DIAGNOSTIC_MODE = "diagnostic";
     private static final String SETTINGS_MODE = "settings";
     private final CardLayout modeLayout = new CardLayout();
@@ -36,16 +37,17 @@ public final class MainFrame extends JFrame {
     private final JLabel currentKnowledge = new JLabel();
     private final JButton searchMode = new JButton("语义检索");
     private final JButton askMode = new JButton("知识问答");
+    private final JButton fileMode = new JButton("文件");
     private final JButton diagnosticMode = new JButton("诊断信息");
     private final JButton settingsMode = new JButton("设置");
     private final DesktopWorkspaceController workspace;
 
     public MainFrame(KnowledgeController knowledge, SearchController search, AskController ask,
-                     BackgroundTaskCoordinator tasks, DesktopFileGateway files,
-                     DiagnosticReportService diagnostics) {
+                     FileBrowserController browser, BackgroundTaskCoordinator tasks,
+                     DesktopFileGateway files, DiagnosticReportService diagnostics) {
         super("SimpleRAG - 本地语义知识库");
-        this.workspace = new DesktopWorkspaceController(knowledge, search, ask, tasks, files,
-                this::showCurrentKnowledge, diagnostics);
+        this.workspace = new DesktopWorkspaceController(knowledge, search, ask, browser, tasks, files,
+                this::showCurrentKnowledge, () -> showMode(FILE_MODE), diagnostics);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setMinimumSize(new Dimension(1120, 680));
         setSize(1440, 860);
@@ -79,8 +81,9 @@ public final class MainFrame extends JFrame {
         JLabel subtitle = new JLabel("LOCAL KNOWLEDGE WORKSPACE"); subtitle.setForeground(Theme.MUTED); subtitle.setFont(Theme.UI_FONT.deriveFont(Font.BOLD, 9f));
         brand.add(title); brand.add(subtitle); brand.setPreferredSize(new Dimension(220, 42));
         JPanel modes = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2)); modes.setOpaque(false);
-        styleModeButton(searchMode); styleModeButton(askMode); styleModeButton(diagnosticMode); styleModeButton(settingsMode);
-        modes.add(searchMode); modes.add(askMode); modes.add(diagnosticMode); modes.add(settingsMode);
+        styleModeButton(searchMode); styleModeButton(askMode); styleModeButton(fileMode);
+        styleModeButton(diagnosticMode); styleModeButton(settingsMode);
+        modes.add(searchMode); modes.add(askMode); modes.add(fileMode); modes.add(diagnosticMode); modes.add(settingsMode);
         currentKnowledge.setForeground(Theme.MUTED); currentKnowledge.setFont(Theme.UI_FONT.deriveFont(Font.BOLD, 12f));
         currentKnowledge.setBorder(Theme.padding(0, 8, 0, 4));
         header.add(brand, BorderLayout.WEST); header.add(modes, BorderLayout.CENTER); header.add(currentKnowledge, BorderLayout.EAST);
@@ -90,16 +93,18 @@ public final class MainFrame extends JFrame {
     private Component buildBody() {
         modeCards.setOpaque(true); modeCards.setBackground(Theme.BACKGROUND);
         modeCards.add(workspace.searchPanel(), SEARCH_MODE); modeCards.add(workspace.askPanel(), ASK_MODE);
+        modeCards.add(workspace.fileViewerPanel(), FILE_MODE);
         modeCards.add(workspace.diagnosticPanel(), DIAGNOSTIC_MODE);
         modeCards.add(workspace.settingsPanel(), SETTINGS_MODE);
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, workspace.knowledgePanel(), modeCards);
-        split.setDividerLocation(270); split.setDividerSize(1); split.setResizeWeight(0); split.setBorder(null); split.setBackground(Theme.BORDER);
+        split.setDividerLocation(300); split.setDividerSize(1); split.setResizeWeight(0); split.setBorder(null); split.setBackground(Theme.BORDER);
         return split;
     }
 
     private void installNavigation() {
         searchMode.addActionListener(event -> showMode(SEARCH_MODE));
         askMode.addActionListener(event -> showMode(ASK_MODE));
+        fileMode.addActionListener(event -> showMode(FILE_MODE));
         diagnosticMode.addActionListener(event -> { workspace.diagnosticPanel().refresh(); showMode(DIAGNOSTIC_MODE); });
         settingsMode.addActionListener(event -> showMode(SETTINGS_MODE));
         getRootPane().getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_K,
@@ -110,12 +115,15 @@ public final class MainFrame extends JFrame {
     }
 
     private void showMode(String mode) {
-        modeLayout.show(modeCards, mode); boolean search = SEARCH_MODE.equals(mode); boolean ask = ASK_MODE.equals(mode);
-        searchMode.setBackground(search ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
-        askMode.setBackground(ask ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
+        modeLayout.show(modeCards, mode);
+        for (JButton button : java.util.List.of(searchMode, askMode, fileMode, diagnosticMode, settingsMode)) {
+            button.setForeground(Theme.TEXT);
+        }
+        searchMode.setBackground(SEARCH_MODE.equals(mode) ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
+        askMode.setBackground(ASK_MODE.equals(mode) ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
+        fileMode.setBackground(FILE_MODE.equals(mode) ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
         diagnosticMode.setBackground(DIAGNOSTIC_MODE.equals(mode) ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
         settingsMode.setBackground(SETTINGS_MODE.equals(mode) ? Theme.ACCENT_DARK : Theme.PANEL_ALT);
-        searchMode.setForeground(Theme.TEXT); askMode.setForeground(Theme.TEXT); diagnosticMode.setForeground(Theme.TEXT); settingsMode.setForeground(Theme.TEXT);
     }
 
     private void showCurrentKnowledge(KnowledgeBase knowledge) {

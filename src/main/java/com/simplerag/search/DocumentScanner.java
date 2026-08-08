@@ -38,6 +38,15 @@ public final class DocumentScanner {
         this.budget = budget == null ? ScanBudget.fromSystemProperties() : budget;
     }
 
+    /**
+     * Directories traversal never descends into. Exposed so anything that reports index coverage
+     * reads the same list the scanner applies; a second copy would drift and mislabel files.
+     */
+    public static boolean isIgnoredDirectory(String directoryName) {
+        return directoryName != null
+                && IGNORED_DIRECTORIES.contains(directoryName.toLowerCase(Locale.ROOT));
+    }
+
     public ScanResult scan(List<Path> sourceRoots) throws IOException {
         return scan(sourceRoots, new DocumentReaderRegistry());
     }
@@ -59,7 +68,7 @@ public final class DocumentScanner {
                     Path name = dir.getFileName();
                     if (name == null) return FileVisitResult.CONTINUE;
                     String directory = name.toString();
-                    if (IGNORED_DIRECTORIES.contains(directory.toLowerCase(Locale.ROOT))) {
+                    if (isIgnoredDirectory(directory)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
                     if (sensitiveFiles.deniesDirectory(directory)) {

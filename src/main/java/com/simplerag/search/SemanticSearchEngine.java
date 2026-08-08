@@ -203,6 +203,16 @@ public final class SemanticSearchEngine {
         return roots;
     }
 
+    /**
+     * File-level manifest entries of the published index.
+     *
+     * <p>Exposed separately from {@link #snapshot()} because that method rebuilds the whole chunk
+     * list on every call; callers that only need per-file coverage should not pay for it.
+     */
+    public List<DocumentIndexEntry> documentEntries() {
+        return documentEntries;
+    }
+
     public int chunkCount() {
         return state.documents.size();
     }

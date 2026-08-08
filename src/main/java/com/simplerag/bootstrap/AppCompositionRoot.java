@@ -3,12 +3,14 @@ package com.simplerag.bootstrap;
 import com.simplerag.adapter.out.filesystem.FileSystemIndexRepository;
 import com.simplerag.adapter.out.filesystem.FileSystemSourceFreshnessMonitor;
 import com.simplerag.adapter.in.swing.AskController;
+import com.simplerag.adapter.in.swing.FileBrowserController;
 import com.simplerag.adapter.in.swing.KnowledgeController;
 import com.simplerag.adapter.in.swing.SearchController;
 import com.simplerag.application.usecase.KnowledgeService;
 import com.simplerag.application.usecase.ApiSettingsUseCase;
 import com.simplerag.application.usecase.AskUseCase;
 import com.simplerag.application.usecase.DesktopQueryService;
+import com.simplerag.application.usecase.FileExplorerUseCase;
 import com.simplerag.application.usecase.IndexBuildUseCase;
 import com.simplerag.application.usecase.KnowledgeBaseUseCases;
 import com.simplerag.application.usecase.KnowledgeSourceUseCases;
@@ -69,12 +71,14 @@ public final class AppCompositionRoot {
         IndexBuildUseCase indexBuild = new IndexBuildUseCase(service);
         SearchUseCase search = new SearchUseCase(runtime);
         AskUseCase ask = new AskUseCase(runtime, sqlite, new FreshnessGate(freshness), chat, sqlite, diagnostics);
+        FileExplorerUseCase explorer = new FileExplorerUseCase(runtime, sqlite);
         DesktopQueryService desktopQueries = new DesktopQueryService(service);
         SwingUtilities.invokeLater(() -> {
             MainFrame frame = new MainFrame(
                     new KnowledgeController(knowledgeBases, sources, indexBuild, desktopQueries),
                     new SearchController(search), new AskController(ask, service,
                             new ConversationStore(ConversationContext.defaults(tokens))),
+                    new FileBrowserController(explorer),
                     new BackgroundTaskCoordinator(), new SystemDesktopFileGateway(),
                     new DiagnosticReportService(runtime, diagnostics));
             frame.setVisible(true);
